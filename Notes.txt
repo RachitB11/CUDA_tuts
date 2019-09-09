@@ -1,0 +1,60 @@
+Lesson1:
+- How to speed up your computation:
+  - Faster clock : Shorter time for computation but way more power.
+  - More work per cycle: There is a limit to the instruction level parallelism
+  - Parallelism: Many smaller simpler processors doing the tasks.
+
+- Modern GPUs
+ - Thousands of ALUs
+ - Hundereds of processors
+ - Tens of thousands of concurrent threads
+
+- GPGPU = General processing on a graphics processing units
+
+- Transistors and becoming smaller but the clock frequency is becoming flat. So
+  are getting faster performance because more transistors are there not because
+  of clock speed.
+- But more transistors means more power and more heat. That's a problem.
+
+- CPU : Have a complex control hardware which means higher performance and flexibility
+        but expensive in terms of power.
+- GPU : Simpler control hardware means power efficient, more HW for computation
+        but less flexible and more restrictive.
+
+- Note that Latency and Throughput are the key factors. CPU optimizes for Latency.
+  It wants to complete the tasks quicker. But GPU wants to process as many tasks as
+  possible at a time and hence optimizes for throughput.
+
+- GPU design tenets:
+  - Lots of simple compute units. Trade simple control for more compute
+  - Explicitly cater to parallel programming.
+  - Optimize for throughput not latency.
+
+- CUDA:
+  - Allows us to program both the CPU and GPU in one program.
+  - CPU is the host. It will be in plain C.
+  - GPU is the device. It will also be in C but with some extensions.
+  - The compiler will split the code and run the respective parts on CPU/GPU.
+  - Assumes that the CPU/GPU have separate memories.
+  - CPU runs the main program and performs the following:
+    - Control data flows from CPU to GPU (cuda memcpy)
+    - Control data flows from GPU to CPU (cuda memcpy)
+    - Allocate memory on the GPU (cuda malloc)
+    - Launch kernel on the GPU
+  - NOTE that the CPU is the boss.
+
+- Typical GPU program
+  1. CPU allocates storage on GPU.
+  2. CPU copies data from the CPU to the GPU.
+  3. CPU launches kernels (equal to number of threads) on GPU to process the data.
+  4. CPU copies results from the CPU back to the GPU.
+
+- GPU programming is favored for applications with a good ratio of processing to
+  communication.
+
+- BIG IDEA OF CUDA:
+  - Kernels look like serial programs. You write programs as if it will run on
+    one thread but the GPU will run that parallel block on many threads. (SPMD)
+  - GPUs are good at:
+    - Efficiently launching lots of threads.
+    - Running lots of threads in parallel.
