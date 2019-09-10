@@ -58,3 +58,34 @@ Lesson1:
   - GPUs are good at:
     - Efficiently launching lots of threads.
     - Running lots of threads in parallel.
+
+- Running a kernel
+  - The first is the number of blocks and the second is the number of threads per block
+  - Can run many blocks at once.
+  - Max number of threads per block is 512 for old and 1024 for new
+  kernel<<<BLOCK_SIZE, THREADS_PER_BLOCK>>>(VARIABLES);
+  - Each thread knows its index in the block and also knows the index of the block
+  - Both of the parameters above can be 1,2 or 3 dimensional. For eg. If you
+    have 128x128 image you could have 1x128 blocks of 128x1 threads or you could
+    have a 8x8 grid of blocks where each block is of size 8x8
+  kernel<<<GRID_OF_BLOCKS, BLOCKS_OF_THREADS>>>(VARIABLES);
+  - You can use the dim3(x,y,z) to define the dimensionality of each of those
+    parameters. It defaults y and z to 1 when not specified.
+  kernel<<<dim3(bx,by,bz), dim3(tx,ty,tz), shmem>>>(VARIABLES)
+  - Here we have
+    - Dimensionality of thread of blocks
+    - Dimensionality of block of threads
+    - Shared memory per block in bytes (defaulted to 0)
+  - Each thread knows
+    - threadIdx: x,y,z dimensions of the thread in the block.
+    - blockDim: Size of the block of threads (How many threads in block)
+    - blockIdx: x,y,z dimensions of block in the grid
+    - gridDim: Size of the grid of blocks
+
+- Map
+  - Here we have elements we want to process in parallel
+  - There is a function we use to process each element
+  - So we have an abstraction Map(ELEMENTS, FUNCTION)
+  - GPUs are good at maps:
+    - GPUS have many parallel processors
+    - Its optimized for throughput and not latency

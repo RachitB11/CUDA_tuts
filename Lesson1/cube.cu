@@ -10,6 +10,14 @@ __global__ void cube(float * d_out, float * d_in){
 }
 
 int main(int argc, char ** argv) {
+
+	// NOTE: h is for host and d is for device
+	// This is the general template of cuda code
+	// 1. CPU allocate memory in the device.
+	// 2. CPU copy data from the host structs to the device structs
+	// 3. CPU runs the kernel on the GPU
+	// 4. CPU copies the data from the device struct to the host struct
+
 	const int ARRAY_SIZE = 64;
 	const int ARRAY_BYTES = ARRAY_SIZE * sizeof(float);
 
@@ -32,6 +40,9 @@ int main(int argc, char ** argv) {
 	cudaMemcpy(d_in, h_in, ARRAY_BYTES, cudaMemcpyHostToDevice);
 
 	// launch the kernel
+	// The first is the number of blocks and the second is the number of threads per block
+	// Can run many blocks at once.
+	// Max number of threads per block is 512 for old and 1024 for new
 	cube<<<1, ARRAY_SIZE>>>(d_out, d_in);
 
 	// copy back the result array to the CPU
