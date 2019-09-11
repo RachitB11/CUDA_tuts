@@ -10,7 +10,7 @@ __global__ void use_local_memory_GPU(float in)
 {
     float f;    // variable "f" is in local memory and private to each thread
     f = in;     // parameter "in" is in local memory and private to each thread
-    // ... real code would presumably do other stuff here ... 
+    // ... real code would presumably do other stuff here ...
 }
 
 /**********************
@@ -50,11 +50,11 @@ __global__ void use_shared_memory_GPU(float *array)
     average = sum / (index + 1.0f);
 
     // if array[index] is greater than the average of array[0..index-1], replace with average.
-    // since array[] is in global memory, this change will be seen by the host (and potentially 
+    // since array[] is in global memory, this change will be seen by the host (and potentially
     // other thread blocks, if any)
     if (array[index] > average) { array[index] = average; }
 
-    // the following code has NO EFFECT: it modifies shared memory, but 
+    // the following code has NO EFFECT: it modifies shared memory, but
     // the resulting modified data is never copied back to global memory
     // and vanishes when the thread block completes
     sh_arr[index] = 3.14;
@@ -63,7 +63,7 @@ __global__ void use_shared_memory_GPU(float *array)
 int main(int argc, char **argv)
 {
     /*
-     * First, call a kernel that shows using local memory 
+     * First, call a kernel that shows using local memory
      */
     use_local_memory_GPU<<<1, 128>>>(2.0f);
 
@@ -74,6 +74,8 @@ int main(int argc, char **argv)
     float *d_arr;       // convention: d_ variables live on device (GPU global mem)
 
     // allocate global memory on the device, place result in "d_arr"
+    // Note that void pointers have no associated data type they can hold addresses
+    // of any type. They can also be typecasted into any type.
     cudaMalloc((void **) &d_arr, sizeof(float) * 128);
     // now copy data from host memory "h_arr" to device memory "d_arr"
     cudaMemcpy((void *)d_arr, (void *)h_arr, sizeof(float) * 128, cudaMemcpyHostToDevice);
@@ -88,7 +90,7 @@ int main(int argc, char **argv)
      */
 
     // as before, pass in a pointer to data in global memory
-    use_shared_memory_GPU<<<1, 128>>>(d_arr); 
+    use_shared_memory_GPU<<<1, 128>>>(d_arr);
     // copy the modified array back to the host
     cudaMemcpy((void *)h_arr, (void *)d_arr, sizeof(float) * 128, cudaMemcpyHostToDevice);
     // ... do other stuff ...

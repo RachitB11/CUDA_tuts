@@ -189,22 +189,55 @@ Lesson 2:
         __shared__ int array[128]; // Again note this is shared among threads in the same block
 
         array[idx] = idx; // Writing : Need to sync threads
-        syncThreads();
+        __syncThreads();
 
         if(idx<127)
         {
           // Important to separate reads and writes from shared memories to prevent collisions
           int temp  = array[idx+1]; // Reading : Need to sync threads
-          syncThreads();
+          __syncThreads();
 
           array[idx] = temp; // Writing : Need to sync threads
-          syncThreads();
+          __syncThreads();
         }
       - There is an implicit barrier between kernels. All blocks in a kernel must
         end before the next thread executes.
 
 - High level stratergies:
+
+  1. Try to be smart with memory
   - Maximize the math per memory by either upping the math per thread or
     reducing the time spent on memory access.
   - Local>Shared>>Global>>CPU(host) in terms of speed.
-  - Local usually in L1 cache or registers.
+  - So you wanna move frequently accessed data to fast memory.
+  - Another way is to use a coalesce the access to global memory.
+    - When a thread wants to use some global memory it will usually grab a chunk
+      of data around it. Thus if surrounding threads are accessing contiguous data
+      this chunk of global memory can be reused. Data is coalesced.
+    - If the threads are accessing scattered data (strided or random) then more memory
+      transactions ie more chunks need to be accessed.
+
+    2. Avoid thread divergence
+    - Threads that do different things due to loops dependent on the id or some
+      conditional logic or any reason for them to not be performing the exact same
+      operation
+    - The GPU likes to perform the same operations on all threads. So some efficiency
+      is lost when some threads have more operations than others.
+
+
+- Atomic:
+  - Helps avoid race conditions (collisions) where different threads are trying to read write
+    modify the same memory.
+  - Some examples are atomicAdd(), atomicMin(), atomicCAS() etc.
+  - Limitations:
+    - Only certain operations and data types are supported
+    - You can work around this using the atomicCAS(). Check it out when possible.
+    - No ordering constraint. Problem is that floating point arithmetic is not associative.
+    - Serializes the operations which can make atomic very slow.
+
+- NOTE: So when you're evaluating time look for both memory constraints and
+  synchronization schemes used.
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+Lesson 3:
