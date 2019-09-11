@@ -143,8 +143,8 @@ void gaussian_blur(const unsigned char* const inputChannel,
       for(int i=-filterRadius; i<=filterRadius; i++)
       {
         float filter_val = filter[j*filterWidth + i];
-        float x_neighbor = clamp(x+i,0,numCols-1);
-        float y_neighbor = clamp(y+j,0,numRows-1);
+        float x_neighbor = min(max(x+i,0),numCols-1);
+        float y_neighbor = min(max(y+j,0),numRows-1);
         float neighbor_val = (float)inputChannel[(y_neighbor*numCols) + x_neighbor];
         filter_sum += filter_val;
         weighted_sum += neighbor_val*filter_val;
@@ -180,7 +180,7 @@ void separateChannels(const uchar4* const inputImageRGBA,
   int x = threadIdx.x+ blockIdx.x* blockDim.x;
   if (y < numRows && x < numCols) {
     int index = numCols*y +x;
-    uchar4 color = rgbaImage[index];
+    uchar4 color = inputImageRGBA[index];
     redChannel[index] = color.x;
     greenChannel[index] = color.y;
     blueChannel[index] = color.z;
@@ -264,7 +264,7 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
   //from the image size and and block size.
   int   blocksX = numCols/blockWidth+1;
   int   blocksY = numRows/blockWidth+1; //TODO
-  const dim3 gridSize;
+  const dim3 gridSize(blocksX,blocksY,1);
 
 
   //TODO: Launch a kernel for separating the RGBA image into different color channels
