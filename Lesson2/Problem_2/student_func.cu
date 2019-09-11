@@ -136,22 +136,20 @@ void gaussian_blur(const unsigned char* const inputChannel,
 
   if (y < numRows && x < numCols)
   {
-    float filter_sum = 0.0;
     float weighted_sum = 0.0;
     for(int j=-filterRadius; j<=filterRadius; j++)
     {
       for(int i=-filterRadius; i<=filterRadius; i++)
       {
-        float filter_val = filter[j*filterWidth + i];
-        float x_neighbor = min(max(x+i,0),numCols-1);
-        float y_neighbor = min(max(y+j,0),numRows-1);
+        float filter_val = filter[(j+filterRadius)*filterWidth + (i+filterRadius)];
+        int x_neighbor = min(max(x+i,0),numCols-1);
+        int y_neighbor = min(max(y+j,0),numRows-1);
         float neighbor_val = (float)inputChannel[(y_neighbor*numCols) + x_neighbor];
-        filter_sum += filter_val;
         weighted_sum += neighbor_val*filter_val;
       }
     }
 
-    outputChannel[(y*numCols) + x] = (unsigned char) (weighted_sum / filter_sum);
+    outputChannel[(y*numCols) + x] = (unsigned char) (weighted_sum);
   }
 }
 
@@ -283,10 +281,10 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
   gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
   // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
@@ -302,7 +300,6 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                                              numRows,
                                              numCols);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
 }
 
 
