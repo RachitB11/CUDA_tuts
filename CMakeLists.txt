@@ -30,9 +30,17 @@ if(CUDA_FOUND)
 
   cuda_add_executable(cuda-test extra/cuda-test.cu)
 
-  cuda_add_executable(cube Lesson1/cube.cu)
+  ####################### LESSON 1 #############################################
+  cuda_add_executable(cube            Lesson1/cube.cu)
   add_subdirectory(Lesson1/Problem_1)
 
+  ####################### LESSON 2 #############################################
+  cuda_add_executable(hello_cuda      Lesson2/hello_cuda.cu)
+  cuda_add_executable(associative     Lesson2/associative.cu)
+  cuda_add_executable(atomics         Lesson2/atomics.cu)
+  cuda_add_executable(hello_blockIdx  Lesson2/hello_blockIdx.cu)
+  cuda_add_executable(hello_threadIdx Lesson2/hello_threadIdx.cu)
+  cuda_add_executable(memory Lesson2/memory.cu)
 
 else(CUDA_FOUND)
   message("CUDA is not installed on this system.")

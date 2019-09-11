@@ -1,4 +1,7 @@
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
 Lesson1:
+
 - How to speed up your computation:
   - Faster clock : Shorter time for computation but way more power.
   - More work per cycle: There is a limit to the instruction level parallelism
@@ -89,3 +92,119 @@ Lesson1:
   - GPUs are good at maps:
     - GPUS have many parallel processors
     - Its optimized for throughput and not latency
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+Lesson 2:
+
+- Threads are working together on the same shared memory:
+  - They may be accessing mutually exclusive data.
+  - Dumping all of their results to the same spot.
+  - Sharing partial results between them.
+
+- Different patterns of communication:
+  - Map:
+    - What we've done till now. Tasks read and write to specific data elements
+    - Like pixels in a image or indexes in an array.
+    - One to one correspondence input and out.
+    - Not flexible. Like can't average.
+  - Gather:
+    - Many input to one output.
+    - Averaging over the window in an array.
+    - Mean filtering over an image.
+  - Scatter:
+    - One input is spread across different output.
+    - Like spreading the pixel value among surrounding pixels.
+    - Scattering the results over the memory.
+    - Problem several threads are trying to access the same memory at same time.
+    - Each thread has to compute where to write the result.
+  NOTE: The main difference between gather and scatter is that in gather non adjacent
+  memory locations are being mapped to adjacent memory locations. In scatter on the
+  other hand adjacent input locations are being mapped to memory locations that are
+  computed using some criteria.
+  - Stencil:
+    - Tasks read input from a fixed neighborhood in an array
+    - There is often a lot of data reuse when the stencil masks overlap
+    - Each cell is of course gonna be read as many times as there are elements in
+      a stencil.
+    - A stencil must generate an output for every input.
+  - Transpose:
+    - Transposing an array expressed in row major order to a column major order.
+    - It can be expressed as a gather or scatter (see NOTE above for how its differnt.)
+    - Can be operated on arrays, matrices, images, data structures (Combining certain
+      fields together to get a Structure of Arrays from an Array of Structures)
+    - Tasks reorder data elements in memory.
+    - It is one to one.
+  NOTE:
+    - Map and transpose are one to one.
+    - A stencil needs to have as many outputs as input. Its a special form of gather.
+    - Gather (Many to one). Mapped to adjacent memory location.
+    - Scatter (one to many). Need to compute where data is being mapped to.
+    - Reduce (all to one) like sum or average
+    - Scan / Sort (all to all) All of the input can affect the destination of the output
+
+- GPU Hardware:
+  - Divide into smaller computations called kernel.
+  - Thread blocks are a group of threads that cooperate to solve a subproblem.
+
+- Threads, blocks and SMs:
+  - A GPU is a collection of streaming multiprocessors or SM.
+  - A SM has a bunch of simple processors and a memory.
+  - When you have threads arranged in blocks the GPU will take care of assigning
+    the blocks to the SM.
+  NOTE: An SM can run more than one thread block but a thread block cannot run in
+  more than one SM. Also note that only threads in the same block may cooperate.
+  - So CUDA makes few guarantees about when and where the thread blocks can be run.
+  - This flexibility allows hardware to run efficiently, no waiting and scalability.
+  - The cons are there are no communication between blocks and no assumption on where
+    blocks are running.
+  NOTE: A dead lock is when one thread is waiting for the result of another but the
+  thread has already been completed.
+  - Threads and blocks must complete. They cannot be hanging around forever.
+  NOTE: cudaDeviceSynchronize() ensure all the blocks execute.
+
+- CUDA guarantees that
+  - All threads ina block run on the same SM at the same time.
+  - All the blocks of 1 kernel finish before the blocks of the next kernel are run.
+
+- Memory model:
+  - All the threads have local memory.
+  - The threads in thread blocks have access to same shared memory which sits on the SM directly.
+  - There is also global memory which is accessible to threads everywhere.
+  - This is the GPU. The CPU of course has its own host memory.
+  - Usually data is copied from the host to the global memory before launching kernels
+    to work on them.
+
+- Synchronization:
+  - Having this shared and global memory means that threads can work together.
+  - But what if one attempt to read a result before another writes it. Hence the
+    need to synchronize.
+  - Barrier:
+    - Point in the program where threads wait till all the threads have reached the
+      point.
+    - NOTE: Each read write from shared memory needs to be followed up by a barrier.
+      Eg:
+        // MOving values one idx left in a shared array
+        int idx = threadIdx.x;
+        __shared__ int array[128]; // Again note this is shared among threads in the same block
+
+        array[idx] = idx; // Writing : Need to sync threads
+        syncThreads();
+
+        if(idx<127)
+        {
+          // Important to separate reads and writes from shared memories to prevent collisions
+          int temp  = array[idx+1]; // Reading : Need to sync threads
+          syncThreads();
+
+          array[idx] = temp; // Writing : Need to sync threads
+          syncThreads();
+        }
+      - There is an implicit barrier between kernels. All blocks in a kernel must
+        end before the next thread executes.
+
+- High level stratergies:
+  - Maximize the math per memory by either upping the math per thread or
+    reducing the time spent on memory access.
+  - Local>Shared>>Global>>CPU(host) in terms of speed.
+  - Local usually in L1 cache or registers.
