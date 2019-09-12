@@ -84,6 +84,9 @@ Lesson1:
     - blockDim: Size of the block of threads (How many threads in block)
     - blockIdx: x,y,z dimensions of block in the grid
     - gridDim: Size of the grid of blocks
+  - A __device__ or __global__ function runs on the GPU /Device functions can only
+    be called from other device or global functions. __device__ functions cannot
+    be called from host code.
 
 - Map
   - Here we have elements we want to process in parallel
@@ -130,7 +133,7 @@ Lesson 2:
     - A stencil must generate an output for every input.
   - Transpose:
     - Transposing an array expressed in row major order to a column major order.
-    - It can be expressed as a gather or scatter (see NOTE above for how its differnt.)
+    - It can be expressed as a gather or scatter (see NOTE above for how its different.)
     - Can be operated on arrays, matrices, images, data structures (Combining certain
       fields together to get a Structure of Arrays from an Array of Structures)
     - Tasks reorder data elements in memory.
@@ -241,3 +244,49 @@ Lesson 2:
 XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 Lesson 3:
+
+Complexity:
+  - Ideal scaling: Work reduces linearly with linear increase in processors.
+  - Need to talk about step complexity and work complexity.
+  - Step complexity is the number of steps in an algorithm.
+  - Work complexity is the sum of individual units done by all.
+  - A parallel algorithm is work efficient if its work complexity is asymptotically the same.
+
+Reduce:
+  - All to one like a sum
+  - It has 2 inputs:
+    - Set of elements
+    - Reduction operator that operates on the arrays
+  - Operators need to have the characteristics:
+    - Binary : Operations should be on 2 vals only.
+    - Associative : (a+b)+c = a+(b+c) where + is any operator
+    - Example : Multiply, add, logical or, logical and, min, max
+  - Serial operations for reductions take n-1 operations on an array size.
+    The work and step complexity is same n-1 or O(n)
+  - Parallel reduce:
+    - Sequential  reduce ((a+b)+c)+d = (a+b) + (c+d) Parallel reduce
+    - This is why associative property was a must.
+    - Now both have same work of 3 operations (+) but if you formulate the steps
+      because (a+b) and (c+d) can be done in parallel the steps reduces to 2 from
+      3.
+    - The step complexity has gone down from n to logn. But in real life you
+      don't always have n/2 processors to do n/2 operations in the first step.
+  - NOTE: See reduce.cu on how to do the reduce method. Also note the difference
+    in using shared memory vs global memory. Notice how you're incurring that
+    additional copy penalty of copying the global data to shared memory of a thread
+    block in order to have faster access and not have to do global memory lookups.
+    Syntax for shared memory kernel:
+    shmem_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>
+        (d_out, d_in);
+    Here the 3rd entry in the bracket is the shared memory size you wanna allocate
+    which is of course equal to the number of threads times the size of the datatype
+    you're working with.
+  - The shared memory variant in reduce.cu is doing 3 times less read write combos
+    to the global memory. In the global memory case in each loop you are reading from
+    and writing to global memory and you get a GP of reads and writes. But in the
+    shared memory case you are only reading all the global values once (1024 reads) and you are
+    writing to global memory only once (1 write) per kernel.
+  - Suggested optimizations beyond just converting to shared memory:
+    - Process multiple items per thread instead of just one. (meaning?? Maybe run fewer blocks and compute more than one entry in intermediate)
+    - Perform the first step of the reduction when copying data from global to shared (trivial)
+    -

@@ -43,6 +43,11 @@ if(CUDA_FOUND)
   cuda_add_executable(memory          Lesson2/memory.cu)
   add_subdirectory(Lesson2/Problem_2)
 
+  ####################### LESSON 3 #############################################
+  cuda_add_executable(histo           Lesson3/histo.cu)
+  cuda_add_executable(reduce          Lesson3/reduce.cu)
+  # add_subdirectory(Lesson3/Problem_3)
+
 else(CUDA_FOUND)
   message("CUDA is not installed on this system.")
 endif()
