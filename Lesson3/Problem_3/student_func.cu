@@ -81,7 +81,7 @@
 
 #include "utils.h"
 
-__global__ shmem_reduce_max_kernel(float* d_out,float* d_in,
+void __global__ shmem_reduce_max_kernel(float* d_out,const float* const d_in,
     const size_t numRows, const size_t numCols)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
@@ -122,7 +122,7 @@ __global__ shmem_reduce_max_kernel(float* d_out,float* d_in,
   }
 }
 
-__global__ shmem_reduce_min_kernel(float* d_out,const float* d_in,
+void __global__ shmem_reduce_min_kernel(float* d_out,const float* const d_in,
     const size_t numRows, const size_t numCols)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
@@ -163,7 +163,7 @@ __global__ shmem_reduce_min_kernel(float* d_out,const float* d_in,
   }
 }
 
-void reduce(const float* const d_in, float &reduced_loglum, std::string op,
+void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   const dim3 blockSize, const dim3 gridSize, const size_t numRows,
   const size_t numCols)
 {
@@ -200,18 +200,14 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string op,
   }
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  float *h_out;
-  checkCudaErrors(cudaMemcpy(h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(&reduced_loglum, d_out, sizeof(float), cudaMemcpyDeviceToHost));
 
-  reduced_loglum = *h_out;
-
-  checkCudaErrors(cudaFree(d_intermediate);
-  checkCudaErrors(cudaFree(d_out);
-  delete []h_out;
+  checkCudaErrors(cudaFree(d_intermediate));
+  checkCudaErrors(cudaFree(d_out));
 }
 
 
-__global__ generateHistogram(float* d_out, const float* d_in,
+void __global__ generateHistogram(unsigned int* d_out, const float* const d_in,
   const float min, const float range, const size_t numRows,
   const size_t numCols, const size_t numBins)
 {
@@ -225,6 +221,14 @@ __global__ generateHistogram(float* d_out, const float* d_in,
     int bin = (int)(((d_in[myId] - min) / range) * numBins);
     atomicAdd(&(d_out[bin]), 1);
   }
+
+}
+
+void __global__ cdfScanHillisSteele(const unsigned int* const d_histogram,
+  unsigned int* const d_cdf)
+{
+  // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
+  extern __shared__ float sdata[];
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -268,7 +272,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   //Compute correct grid size (i.e., number of blocks per kernel launch)
   //from the image size and and block size.
   int   blocksX = numCols/blockWidth+1;
-  int   blocksY = numRows/blockWidth+1; //TODO
+  int   blocksY = numRows/blockWidth+1;
   const dim3 gridSize(blocksX,blocksY,1);
 
   // Call the reduce method
@@ -277,20 +281,34 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
 
 // ==================== 2. Find the range ======================================
   float range_logLum = max_logLum - min_logLum;
-  printf("Min: %f, Max: %f, Range: %f\n", min_logLum, max_logLum, range_logLum);
+  std::cout<<"Min: "<<min_logLum<<" , "<<"Max: "<<max_logLum<<" , "<<"Range: "<<range_logLum<<std::endl;
 
 // ==================== 3. Generate the histogram ==============================
   unsigned int* d_histogram;
-  checkCudaErrors(cudaMalloc((void**) &d_histogram, numBins*sizeof(unsigned int)));
-  cudaMemset((void *) d_histogram, 0, ARRAY_BYTES);
+  int binBytes = numBins*sizeof(unsigned int);
+  checkCudaErrors(cudaMalloc((void**) &d_histogram, binBytes));
+  checkCudaErrors(cudaMemset((void *) d_histogram, 0, binBytes));
 
   generateHistogram<<<gridSize, blockSize>>> (d_histogram, d_logLuminance, min_logLum,
     range_logLum, numRows, numCols, numBins);
+  std::cout<<"Rows: "<<numRows<<" , "<<"Cols: "<<numCols<<" , "<<"Bins: "<<numBins<<std::endl;
 
+  unsigned int h_histogram[numBins];
+  for(unsigned int i = 0; i < numBins; i++) {
+      h_histogram[i] = 0;
+  }
+  checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, binBytes, cudaMemcpyDeviceToHost));
+
+  unsigned int sum = 0;
+  for(unsigned int i=0; i<numBins;i++)
+  {
+    sum+=h_histogram[i];
+  }
+
+  std::cout<<"Sum: "<<sum<<" , "<<"Num pixels: "<<(numRows*numCols)<<std::endl;
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
 // ==================== 4. Implement the HIllis/Steele Scan for cdf=============
-
-
+  cdfScanHillisSteele<<<1, numBins, binBytes>>> (d_histogram, d_cdf);
   checkCudaErrors(cudaFree(d_histogram));
 }
