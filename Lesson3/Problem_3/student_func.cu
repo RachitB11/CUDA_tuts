@@ -80,86 +80,119 @@
 */
 
 #include "utils.h"
+#include "stdio.h"
+#include <type_traits>
+#include <float.h>
 
-void __global__ shmem_reduce_max_kernel(float* d_out,const float* const d_in,
-    const size_t numRows, const size_t numCols)
+// Minimum functor
+class mini
 {
-  // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
-  extern __shared__ float sdata[];
-
-  int myId_x = threadIdx.x + blockDim.x * blockIdx.x;
-  int myId_y = threadIdx.y + blockDim.y * blockIdx.y;
-
-  if(myId_x<numCols && myId_y<numRows)
+  public:
+  __device__
+  float operator() (float x, float y)
   {
-    // Find the Id of the thread in the global memory
-    int myId = myId_y*numCols + myId_x;
-
-    // Find the Id of the thread in the block
-    int tid = threadIdx.y*blockDim.x + threadIdx.x;
-
-    // load shared mem from global mem
-    sdata[tid] = d_in[myId];
-    __syncthreads();            // make sure entire block is loaded!
-
-    // Do reduction in shared mem
-    // Divide the set into 2 and do the operations between them. Again split by
-    // half and compare. Repeat till you get the single reduced element.
-    for (unsigned int s = (blockDim.x*blockDim.y)/ 2; s > 0; s >>= 1)
-    {
-        if (tid < s)
-        {
-          sdata[tid]  = (sdata[tid]>sdata[tid + s]) ? sdata[tid]:sdata[tid+s];
-        }
-        __syncthreads();        // make sure all adds at one stage are done!
-    }
-
-    // only thread 0 writes result for this block back to global mem
-    if (tid == 0)
-    {
-      d_out[blockIdx.y*gridDim.x + blockIdx.x] = sdata[0];
-    }
+          return fmin(x,y);
   }
+};
+
+// Maximum functor
+class maxi
+{
+  public:
+  __device__
+  float operator() (float x, float y)
+  {
+          return fmax(x,y);
+  }
+};
+
+// Find the power of 2 higher than a number
+unsigned int nextPowerOf2(unsigned int n)
+{
+  unsigned count = 0;
+
+  // First n in the below condition
+  // is for the case where n is 0
+  if (n && !(n & (n - 1)))
+      return n;
+
+  while( n != 0)
+  {
+      n >>= 1;
+      count += 1;
+  }
+
+  return 1 << count;
 }
 
-void __global__ shmem_reduce_min_kernel(float* d_out,const float* const d_in,
-    const size_t numRows, const size_t numCols)
+// Operation templated reduce kernel for typename float
+// TODO: Template for typename
+template<class T>
+void __global__ shmem_reduce_kernel(float* d_out,const float* const d_in,
+    const size_t numRows, const size_t numCols, T func)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
+  // Allocate the shared data
   extern __shared__ float sdata[];
 
   int myId_x = threadIdx.x + blockDim.x * blockIdx.x;
   int myId_y = threadIdx.y + blockDim.y * blockIdx.y;
 
+  // Find the Id of the thread in the global memory
+  int myId = myId_y*numCols + myId_x;
+
+  // Find the Id of the thread in the block
+  int tid = threadIdx.y*blockDim.x + threadIdx.x;
+
+  // If within image get the data from global memory or set to identity
   if(myId_x<numCols && myId_y<numRows)
   {
-    // Find the Id of the thread in the global memory
-    int myId = myId_y*numCols + myId_x;
-
-    // Find the Id of the thread in the block
-    int tid = threadIdx.y*blockDim.x + threadIdx.x;
-
     // load shared mem from global mem
     sdata[tid] = d_in[myId];
-    __syncthreads();            // make sure entire block is loaded!
-
-    // Do reduction in shared mem
-    // Divide the set into 2 and do the operations between them. Again split by
-    // half and compare. Repeat till you get the single reduced element.
-    for (unsigned int s = (blockDim.x*blockDim.y)/ 2; s > 0; s >>= 1)
+  }
+  else
+  {
+    if(std::is_same<T, mini>::value)
     {
-        if (tid < s)
-        {
-            sdata[tid]  = (sdata[tid]<sdata[tid + s]) ? sdata[tid]:sdata[tid+s];
-        }
-        __syncthreads();        // make sure all adds at one stage are done!
+      sdata[tid] = FLT_MAX;
     }
-
-    // only thread 0 writes result for this block back to global mem
-    if (tid == 0)
+    else if(std::is_same<T, maxi>::value)
     {
-      d_out[blockIdx.y*gridDim.x + blockIdx.x] = sdata[0];
+      sdata[tid] = FLT_MIN;
     }
+  }
+  __syncthreads();            // make sure entire block is loaded!
+
+  // Do reduction in shared mem
+  // Divide the set into 2 and do the operations between them. Again split by
+  // half and compare. Repeat till you get the single reduced element.
+
+  // IMPORTANT IMPLEMENTATION NOTE:
+  // Reduction is built for only powers of 2 so if the number of elements are not
+  // a power of 2 you need to account for that.
+  // Here if it isn't a power of 2 there is gonna be a point that the number of
+  // elements become odd. So account for that.
+  // unsigned int s_old = (blockDim.x*blockDim.y);
+  for (unsigned int s = (blockDim.x*blockDim.y)/ 2; s > 0; s >>= 1)
+  {
+      if (tid < s)
+      {
+        sdata[tid]  = func(sdata[tid],sdata[tid + s]);
+      }
+      // You check if there was one extra element that was left uncompared because
+      // of the value becoming odd and account for that.
+      // if(s_old>2*s && tid==s-1)
+      // {
+      //   sdata[tid]  = func(sdata[tid],sdata[s_old-1]);
+      // }
+      __syncthreads();        // make sure all adds at one stage are done!
+      // s_old = s;
+  }
+
+  // only thread 0 writes result for this block back to global mem
+  if (tid == 0)
+  {
+    d_out[blockIdx.y*gridDim.x + blockIdx.x] = sdata[0];
   }
 }
 
@@ -167,41 +200,52 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   const dim3 blockSize, const dim3 gridSize, const size_t numRows,
   const size_t numCols)
 {
-  int gridBytes = gridSize.x*gridSize.y*sizeof(float);
-  int blockBytes = blockSize.x*blockSize.y*sizeof(float);
+  // Set the bytes for the grid and block
+  unsigned int gridBytes = gridSize.x*gridSize.y*sizeof(float);
+  unsigned int blockBytes = blockSize.x*blockSize.y*sizeof(float);
 
+  // Find the max in each block (d_intermediate) and then the max of the max (d_out)
   float *d_intermediate, *d_out;
-
   checkCudaErrors(cudaMalloc((void**) &d_intermediate, gridBytes));
   checkCudaErrors(cudaMalloc((void**) &d_out, sizeof(float)));
 
+  // Implement the shared mem reduce kernel on the whole image
   if(ops=="min")
   {
-    shmem_reduce_min_kernel<<<gridSize, blockSize, blockBytes>>>(d_intermediate, d_in,
-                                                                  numRows, numCols);
+    shmem_reduce_kernel<mini><<<gridSize, blockSize, blockBytes>>>(d_intermediate, d_in,
+                                                                  numRows, numCols, mini());
   }
   else if(ops=="max")
   {
-    shmem_reduce_max_kernel<<<gridSize, blockSize, blockBytes>>>(d_intermediate, d_in,
-                                                                  numRows, numCols);
+    shmem_reduce_kernel<maxi><<<gridSize, blockSize, blockBytes>>>(d_intermediate, d_in,
+                                                                  numRows, numCols, maxi());
   }
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  // now we're down to one block left, so reduce it
+  // Allocate the size to the nearest power of 2 because reduce assumes the power of 2.
+  unsigned int new_blockSize = nextPowerOf2((unsigned int)(gridSize.x*gridSize.y));
+
+  // Now reduce the max of max blocks
   if(ops=="min")
   {
-    shmem_reduce_min_kernel<<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
-                                                        numRows, numCols);
+    shmem_reduce_kernel<mini><<<1, new_blockSize, new_blockSize*sizeof(float)>>>(d_out, d_intermediate,
+                                                        1, gridSize.x*gridSize.y, mini());
+    // shmem_reduce_kernel<mini><<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
+    //                                                     gridSize.x,gridSize.y, mini());
   }
   else if(ops=="max")
   {
-    shmem_reduce_max_kernel<<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
-                                                        numRows, numCols);
+    shmem_reduce_kernel<maxi><<<1, new_blockSize, new_blockSize*sizeof(float)>>>(d_out, d_intermediate,
+                                                        1, gridSize.x*gridSize.y, maxi());
+    // shmem_reduce_kernel<maxi><<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
+    //                                                     gridSize.x,gridSize.y, maxi());
   }
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+  // Copy the result to the variable
   checkCudaErrors(cudaMemcpy(&reduced_loglum, d_out, sizeof(float), cudaMemcpyDeviceToHost));
 
+  // Cleanup
   checkCudaErrors(cudaFree(d_intermediate));
   checkCudaErrors(cudaFree(d_out));
 }
@@ -218,50 +262,51 @@ void __global__ generateHistogram(unsigned int* d_out, const float* const d_in,
   {
     // Find the Id of the thread in the global memory
     int myId = myId_y*numCols + myId_x;
-    int bin = (int)(((d_in[myId] - min) / range) * numBins);
+    int bin = (d_in[myId] - min) / range * numBins;
+
     atomicAdd(&(d_out[bin]), 1);
   }
-
 }
 
-void __global__ cdfScanHillisSteele(const unsigned int* const d_histogram,
+void __global__ cdfScanHillisSteele(const unsigned int* d_histogram,
   unsigned int* const d_cdf)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
-  extern __shared__ unsigned int sdata[];
+  extern __shared__ unsigned int shistodata[];
 
   // Find the Id of the thread in the block
-  int tid = threadIdx.y*blockDim.x + threadIdx.x;
+  int tid = threadIdx.x;
 
   // Copy the data to the shared memory
-  // Since we're doing an inclusive scan copy the data from n-1 and set position
+  // shistodata[tid] = d_histogram[tid];
+  // If we're doing an exclusive scan copy the data from n-1 and set position
   // 0 to identity which in this case is 0
   if(tid==0)
-    sdata[tid] = 0;
+    shistodata[tid] = 0;
   else
-    sdata[tid] = d_histogram[tid-1];
-  __syncThreads();
+    shistodata[tid] = d_histogram[tid-1];
+  __syncthreads();
 
   unsigned int temp;
 
   // Do reduction in shared mem
   for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
   {
+      // printf("%d %d\n",s,tid);
       // Do not touch if the data has no neighbour s indexes left to it.
-      if (tid < s-1)
+      if(tid >= s)
       {
-        temp = sdata[tid];
+        temp = shistodata[tid] + shistodata[tid-s];
       }
       else
       {
-        temp = sdata[tid] + sdata[tid-s];
+        temp = shistodata[tid];
       }
       __syncthreads();        // make sure all adds at one stage are done!
-      sdata[tid] = temp;
+      shistodata[tid] = temp;
       __syncthreads();        // make sure all adds at one stage are done!
   }
-
-  d_cdf[tid] = sdata[tid];
+  d_cdf[tid] = shistodata[tid];
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -283,29 +328,18 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
 
-    // For 1 we need to implement the parallel reduce with min and max ops. They
-    // are binary as well as associate operations and can be implemented in reduce.
-
-    // For 2 just need to subtract the values
-
-    // For 3 need to make a histogram using one of the methods. Lets start off
-    // with the purely atomics one.
-
-    // For 4 we need to implement an exclusive scan  for which we could use the
-    // Reduce downsweep or modify hillis/steele for inclusive scan by adding the
-    // identity to the list and performing the same steps.
-
-
 // ==================== 1. Min Max using parallel reduce =======================
 
   // Set reasonable block size (i.e., number of threads per block)
+  // This is a pretty good block width because the warp size (Threads running parallely
+  // running the absolute same piece of code) is 32 for normal Nvidia GPUs
   int blockWidth = 32;
   const dim3 blockSize(blockWidth, blockWidth, 1);
 
   //Compute correct grid size (i.e., number of blocks per kernel launch)
   //from the image size and and block size.
-  int   blocksX = numCols/blockWidth+1;
-  int   blocksY = numRows/blockWidth+1;
+  int   blocksX = numCols/blockWidth + 1; // Add 1 to make sure enough space.
+  int   blocksY = numRows/blockWidth + 1; // Add 1 to make sure enough space.
   const dim3 gridSize(blocksX,blocksY,1);
 
   // Call the reduce method
@@ -326,22 +360,35 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     range_logLum, numRows, numCols, numBins);
   std::cout<<"Rows: "<<numRows<<" , "<<"Cols: "<<numCols<<" , "<<"Bins: "<<numBins<<std::endl;
 
-  unsigned int h_histogram[numBins];
-  for(unsigned int i = 0; i < numBins; i++) {
-      h_histogram[i] = 0;
-  }
-  checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, binBytes, cudaMemcpyDeviceToHost));
+  // unsigned int h_histogram[numBins];
+  // for(unsigned int i = 0; i < numBins; i++) {
+  //     h_histogram[i] = 0;
+  // }
+  // checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, binBytes, cudaMemcpyDeviceToHost));
 
-  unsigned int sum = 0;
-  for(unsigned int i=0; i<numBins;i++)
-  {
-    sum+=h_histogram[i];
-  }
-
-  std::cout<<"Sum: "<<sum<<" , "<<"Num pixels: "<<(numRows*numCols)<<std::endl;
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  // unsigned int sum = 0;
+  // for(unsigned int i=0; i<numBins;i++)
+  // {
+  //   sum+=h_histogram[i];
+  // }
+  // std::cout<<"Sum: "<<sum<<" , "<<"Num pixels: "<<(numRows*numCols)<<std::endl;
 
 // ==================== 4. Implement the HIllis/Steele Scan for cdf=============
   cdfScanHillisSteele<<<1, numBins, binBytes>>> (d_histogram, d_cdf);
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
   checkCudaErrors(cudaFree(d_histogram));
+
+  // unsigned int h_cdf[numBins];
+  // for(unsigned int i = 0; i < numBins; i++) {
+  //     h_cdf[i] = 0;
+  // }
+  // checkCudaErrors(cudaMemcpy(h_cdf, d_cdf, binBytes, cudaMemcpyDeviceToHost));
+  // printf("CDF: ");
+  // for(unsigned int i=0; i<numBins;i++)
+  // {
+  //   printf("%d ",h_cdf[i]);
+  // }
+  // printf("\n");
+  // printf("%d ",h_cdf[numBins-1]);
 }
