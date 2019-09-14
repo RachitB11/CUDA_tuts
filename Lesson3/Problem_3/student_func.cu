@@ -228,7 +228,40 @@ void __global__ cdfScanHillisSteele(const unsigned int* const d_histogram,
   unsigned int* const d_cdf)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
-  extern __shared__ float sdata[];
+  extern __shared__ unsigned int sdata[];
+
+  // Find the Id of the thread in the block
+  int tid = threadIdx.y*blockDim.x + threadIdx.x;
+
+  // Copy the data to the shared memory
+  // Since we're doing an inclusive scan copy the data from n-1 and set position
+  // 0 to identity which in this case is 0
+  if(tid==0)
+    sdata[tid] = 0;
+  else
+    sdata[tid] = d_histogram[tid-1];
+  __syncThreads();
+
+  unsigned int temp;
+
+  // Do reduction in shared mem
+  for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
+  {
+      // Do not touch if the data has no neighbour s indexes left to it.
+      if (tid < s-1)
+      {
+        temp = sdata[tid];
+      }
+      else
+      {
+        temp = sdata[tid] + sdata[tid-s];
+      }
+      __syncthreads();        // make sure all adds at one stage are done!
+      sdata[tid] = temp;
+      __syncthreads();        // make sure all adds at one stage are done!
+  }
+
+  d_cdf[tid] = sdata[tid];
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
