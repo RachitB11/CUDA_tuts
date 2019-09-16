@@ -4,6 +4,8 @@
 #include "utils.h"
 #include <thrust/host_vector.h>
 
+#include<bitset>
+
 #define RADIX_NUMBER 2
 /* Red Eye Removal
    ===============
@@ -45,7 +47,7 @@
 
  // Use the predicate and the histogram to map the data to the new positions in
  // the sorted array
- fillOutputValAndPositions(const unsigned int* const d_input,
+ void __global__ fillOutputValAndPositions(const unsigned int* const d_input,
    const unsigned int* const d_inputPos,
    unsigned int* const d_output, unsigned int* const d_outputPos,
    const unsigned int* const d_histogram, const unsigned int* const d_relative_offsets,
@@ -55,7 +57,7 @@
 
    if(myId<numElems)
    {
-     usigned int new_position = d_histogram[d_predicate[myId]] + d_relative_offsets[myId];
+     unsigned int new_position = d_histogram[d_predicate[myId]] + d_relative_offsets[myId];
      d_outputPos[new_position] = d_inputPos[myId];
      d_output[new_position] = d_input[myId];
    }
@@ -70,22 +72,16 @@
    // Another quick note here we are doing dynamic memory allocation.
    extern __shared__ unsigned int soffsetdata[];
 
+   printf("Here1");
+
    int myId = threadIdx.x + blockDim.x * blockIdx.x;
 
-   for(unsigned int i = 0; i<numBins; i++)
-   {
-     soffsetdata[i*numElems+myId]=0;
-   }
-   unsigned int predicate = numBins+1;
-
-   if(myId<numElems)
-   {
-     predicate = d_predicate[d_inputPos[myId]];
-     soffsetdata[predicate*numElems+myId] = 1;
-   }
+   soffsetdata[myId]=1;
    __syncthreads();
 
-   unsigned int temp[numBins];
+   printf("Here2");
+
+   unsigned int temp;
 
    for (unsigned int s = 1; s < numElems ; s <<= 1)
    {
@@ -94,26 +90,29 @@
          // Do not touch if the data has no neighbour s indexes left to it.
          if(myId >= s)
          {
-           for(unsigned int i=0; i<numBins; i++)
-            temp[i] = soffsetdata[i*numElems + myId] + soffsetdata[i*numElems + myId - s];
+            if(d_predicate[myId]==d_predicate[myId-s])
+              temp = soffsetdata[myId] + soffsetdata[myId - s];
          }
          else
          {
-           for(unsigned int i=0; i<numBins; i++)
-            temp[i] = soffsetdata[i*numElems + myId];
+            temp = soffsetdata[myId];
          }
        }
        __syncthreads();        // make sure all adds at one stage are done!
-       for(unsigned int i=0; i<numBins; i++)
-        soffsetdata[i*numElems + myId] = temp[i];
+       if(myId<numElems)
+        soffsetdata[myId] = temp;
        __syncthreads();        // make sure all adds at one stage are done!
    }
+
+   printf("Here3");
 
    if(myId<numElems)
    {
      // You need to subtract by -1 to ensure exclusive scan
-     d_relative_offsets[myId] = soffsetdata[predicate*numElems + myId] - 1;
+     d_relative_offsets[myId] = soffsetdata[myId] - 1;
    }
+
+   printf("Here4");
  }
 
 
@@ -143,10 +142,10 @@
       shistodata[i*blockDim.x + tid] = 0;
    else
     for(unsigned int i=0; i<numHistograms; i++)
-      shistodata[i*blockDim.x + tid] = d_histogram[i*blockDim.x + tid - 1];
+      shistodata[i*blockDim.x + tid] = d_histograms[i*blockDim.x + tid - 1];
    __syncthreads();
 
-   unsigned int temp[numHistograms];
+   unsigned int* temp = new unsigned int[numHistograms];
 
    for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
    {
@@ -169,7 +168,9 @@
 
    // Assign to the global array
    for(unsigned int i=0; i<numHistograms; i++)
-    d_cdf[i*blockDim.x + tid] = shistodata[i*blockDim.x + tid];
+    d_cdfs[i*blockDim.x + tid] = shistodata[i*blockDim.x + tid];
+
+   delete temp;
  }
 
 
@@ -182,7 +183,7 @@
  {
    int myId = threadIdx.x + blockDim.x * blockIdx.x;
 
-   unsigned int val = d_inputVals[i];
+   unsigned int val = d_inputVals[myId];
 
    if(myId<numElems)
    {
@@ -209,6 +210,17 @@ void your_sort(unsigned int* const d_inputVals,
   // So a radix sort is you take the LSB move all the 0s to the top and all the 1s
   // to the bottom
 
+  // TODO:
+  // Convert the global histogram function into a local histogram function.
+  // Do an inclusive scan on the local histogram data. The last elements are the global histogram data
+  // The remaining in the inclusive scan will be used to estimate the relative offsets.
+  // So this local histogram cdf can be used directly.
+
+  // Local histogram (digit*grid*numBins) cdf along the grid dimension per digit 
+  // will give the information in the offset while doing the scan over the whole
+  // array for individual digits.
+  // Global histogram (digit*numBins) cdf will give the offsets between digits.
+
 ////// 1. Histogram of the number of occurrences of each digit /////////////////
 
   // NOTE:
@@ -227,20 +239,23 @@ void your_sort(unsigned int* const d_inputVals,
   const unsigned int radixBits = pow(2,RADIX_NUMBER);
   const size_t numBins = pow(2,radixBits);
   unsigned int mask = pow(2,radixBits)-1;
-  int binBytes = numHistograms * numBins * sizeof(unsigned int);
-  int elemBytes = numHistograms * numElems * sizeof(unsigned int);
 
   // Assuming unsigned int size of 32 number of histograms equals number of masks
   // equals 32/radixBits
   const size_t numHistograms = 32/radixBits;
+  int binBytes = numHistograms * numBins * sizeof(unsigned int);
+  int elemBytes = numHistograms * numElems * sizeof(unsigned int);
+
   unsigned int* h_mask_array = new unsigned int[numHistograms];
   // Populate the mask array
-  for(unsigned int i=1; i<numHistograms; i++)
+  for(unsigned int i=0; i<numHistograms; i++)
   {
     h_mask_array[i] = mask<<(radixBits*i);
+    // std::cout<<std::bitset<32>(h_mask_array[i])<<std::endl;
   }
   // Move the mask array to the device
   unsigned int* d_mask_array;
+  checkCudaErrors(cudaMalloc((void**) &d_mask_array, numHistograms * sizeof(unsigned int)));
   checkCudaErrors(cudaMemcpy(d_mask_array, h_mask_array, numHistograms * sizeof(unsigned int), cudaMemcpyHostToDevice));
 
   // Array to store all the histograms of digits
@@ -279,6 +294,28 @@ void your_sort(unsigned int* const d_inputVals,
   cdfSegmentedScanHillisSteele<<<1, numBins, binBytes>>>(d_histograms, d_cdfs, numHistograms);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+  std::cout<<"Number of elements are "<<numElems<<std::endl;
+  unsigned int* h_histograms = new unsigned int[numHistograms*numBins];
+  unsigned int* h_cdfs = new unsigned int[numHistograms*numBins];
+  checkCudaErrors(cudaMemcpy(h_histograms, d_histograms, binBytes, cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(h_cdfs, d_cdfs, binBytes, cudaMemcpyDeviceToHost));
+  for(unsigned int i=0; i<numHistograms; i++)
+  {
+    unsigned int sum = 0;
+    std::cout<<"CDF: ";
+    for(unsigned int j=0; j<numBins; j++)
+    {
+      sum+=h_histograms[i*numBins+j];
+      std::cout<<h_cdfs[i*numBins+j]<<" ";
+    }
+    std::cout<<std::endl<<"Sum for Histogram "<<i<<" the sum is "<<sum<<std::endl;
+  }
+  delete h_histograms;
+
+  checkCudaErrors(cudaFree(d_mask_array));
+  checkCudaErrors(cudaFree(d_histograms));
+  delete h_mask_array;
+
 //////////////////3.Determine relative offset of each digit/////////////////////
   // Basically go through the numbers 1 by 1 and check its digit and add offset by
   // 1
@@ -294,36 +331,43 @@ void your_sort(unsigned int* const d_inputVals,
   {
     // You need to ping pong between the output and input because they are on
     // const addresses and cannot be swapped.
-    unisgned int* d_current_input;
-    unisgned int* d_current_inputPos;
-    unisgned int* d_current_output;
-    unisgned int* d_current_outputPos;
+    // You need to first create an auxillary block which will be of size numBinsxgridSize
+    // which will store the segmented scan for each block.
+    // While setting the final position, you will make use of 3 things to estimate
+    // the final position:
+    // - d_relative_offsets which contains the block offsets info (maintain a histogram locally)
+    // - d_block_offsets which contain the offsets of each block (You need to do a scan over local histograms)
+    // - d_cdf which gives you offset in each bin.
+    // - Final should be (d_cdf + d_block_offsets + d_relative_offsets)
 
-    if(i%2==0)
-    {
-      d_current_input = d_inputVals;
-      d_current_inputPos = d_inputPos;
-      d_current_output = d_outputVals;
-      d_current_outputPos = d_outputPos;
-    }
-    else
-    {
-      d_current_input = d_outputVals;
-      d_current_inputPos = d_outputPos;
-      d_current_output = d_inputVals;
-      d_current_outputPos = d_inputPos;
-    }
 
-    compactAndSegmentScan<<<gridSize,blockSize, numBins*numElems*sizeof(unsigned int)>>>(
-      d_current_inputPos, d_predicate + (i*numElems) - 1, d_relative_offsets, numBins,
-      numElems);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-    fillOutputValAndPositions<<<gridSize,blockSize>>(d_current_input,
-      d_current_inputPos, d_current_output, d_current_outputPos,
-      d_histograms + (i*numBins) - 1, d_relative_offsets,
-      d_predicate + (i*numElems) - 1, numElems);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // if(i%2==0)
+    // {
+    //   compactAndSegmentScan<<<gridSize,blockSize, blockSize*sizeof(unsigned int)>>>(
+    //     d_inputPos, (d_predicate + (i*numElems)), d_relative_offsets, numBins,
+    //     numElems);
+    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    //
+    //   fillOutputValAndPositions<<<gridSize,blockSize>>>(d_inputVals,
+    //     d_inputPos, d_outputVals, d_outputPos,
+    //     d_cdfs + (i*numBins), d_relative_offsets,
+    //     d_predicate + (i*numElems), numElems);
+    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // }
+    // else
+    // {
+    //   compactAndSegmentScan<<<gridSize,blockSize, blockSize*sizeof(unsigned int)>>>(
+    //     d_outputPos, (d_predicate + (i*numElems)), d_relative_offsets, numBins,
+    //     numElems);
+    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    //
+    //   fillOutputValAndPositions<<<gridSize,blockSize>>>(d_outputVals,
+    //     d_outputPos, d_inputVals, d_inputPos,
+    //     d_cdfs + (i*numBins), d_relative_offsets,
+    //     d_predicate + (i*numElems), numElems);
+    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // }
+    checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes/numHistograms));
   }
 
   if(numHistograms%2==1)
@@ -332,10 +376,9 @@ void your_sort(unsigned int* const d_inputVals,
     checkCudaErrors(cudaMemcpy(d_outputVals, d_inputVals, numElems * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
   }
 
+  checkCudaErrors(cudaFree(d_relative_offsets));
   checkCudaErrors(cudaFree(d_cdfs));
-  checkCudaErrors(cudaFree(d_histograms));
   checkCudaErrors(cudaFree(d_predicate));
   checkCudaErrors(cudaFree(d_mask_array));
-  delete []h_mask_array;
 
 }
