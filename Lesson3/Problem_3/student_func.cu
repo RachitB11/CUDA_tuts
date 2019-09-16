@@ -88,6 +88,8 @@
 class mini
 {
   public:
+  // Note that since these functors are gonna be called from within the global
+  // method they need to have the __device__ tag.
   __device__
   float operator() (float x, float y)
   {
@@ -99,6 +101,8 @@ class mini
 class maxi
 {
   public:
+  // Note that since these functors are gonna be called from within the global
+  // method they need to have the __device__ tag.
   __device__
   float operator() (float x, float y)
   {
@@ -127,6 +131,8 @@ unsigned int nextPowerOf2(unsigned int n)
 
 // Operation templated reduce kernel for typename float
 // TODO: Template for typename
+// TODO: Implement the warp reduce method:
+// https://stackoverflow.com/questions/10729185/removing-syncthreads-in-cuda-warp-level-reduction
 template<class T>
 void __global__ shmem_reduce_kernel(float* d_out,const float* const d_in,
     const size_t numRows, const size_t numCols, T func)
@@ -179,13 +185,18 @@ void __global__ shmem_reduce_kernel(float* d_out,const float* const d_in,
       {
         sdata[tid]  = func(sdata[tid],sdata[tid + s]);
       }
+
+      //////////////// MAINTAINING S_OLD TRICK//////////////////////////////////
       // You check if there was one extra element that was left uncompared because
       // of the value becoming odd and account for that.
       // if(s_old>2*s && tid==s-1)
       // {
       //   sdata[tid]  = func(sdata[tid],sdata[s_old-1]);
       // }
+      ///////////////////////////////////////////////////////////////////////////
+
       __syncthreads();        // make sure all adds at one stage are done!
+
       // s_old = s;
   }
 
@@ -210,6 +221,8 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   checkCudaErrors(cudaMalloc((void**) &d_out, sizeof(float)));
 
   // Implement the shared mem reduce kernel on the whole image
+  // NOTE: Since the blockWidth was hard coded to 32 we shouldn't have a problem
+  // with the reduce here.
   if(ops=="min")
   {
     shmem_reduce_kernel<mini><<<gridSize, blockSize, blockBytes>>>(d_intermediate, d_in,
@@ -222,6 +235,10 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   }
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+  // NOTE: The grid size is dependent on the the numRows and numCols so it may not
+  // be  a power of 2 so you need to estimate the new block size as the nearest
+  // power of 2 that is greater than gridSize.x*gridSize.y.
+
   // Allocate the size to the nearest power of 2 because reduce assumes the power of 2.
   unsigned int new_blockSize = nextPowerOf2((unsigned int)(gridSize.x*gridSize.y));
 
@@ -230,6 +247,7 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   {
     shmem_reduce_kernel<mini><<<1, new_blockSize, new_blockSize*sizeof(float)>>>(d_out, d_intermediate,
                                                         1, gridSize.x*gridSize.y, mini());
+    // USE WHEN USING THE S_OLD TRICK IN THE REDUCE KERNEL
     // shmem_reduce_kernel<mini><<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
     //                                                     gridSize.x,gridSize.y, mini());
   }
@@ -237,6 +255,7 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   {
     shmem_reduce_kernel<maxi><<<1, new_blockSize, new_blockSize*sizeof(float)>>>(d_out, d_intermediate,
                                                         1, gridSize.x*gridSize.y, maxi());
+    // USE WHEN USING THE S_OLD TRICK IN THE REDUCE KERNEL
     // shmem_reduce_kernel<maxi><<<1, gridSize, gridBytes>>>(d_out, d_intermediate,
     //                                                     gridSize.x,gridSize.y, maxi());
   }
@@ -250,7 +269,8 @@ void reduce(const float* const d_in, float &reduced_loglum, std::string ops,
   checkCudaErrors(cudaFree(d_out));
 }
 
-
+// Generate the histogram using the simple atomics way
+// TODO: Try running the local histogram and reduce.
 void __global__ generateHistogram(unsigned int* d_out, const float* const d_in,
   const float min, const float range, const size_t numRows,
   const size_t numCols, const size_t numBins)
@@ -268,10 +288,17 @@ void __global__ generateHistogram(unsigned int* d_out, const float* const d_in,
   }
 }
 
+// Perform the hillis steele scan with the sum operation to get the cdf
+//NOTE: This assumes the gridSize is 1 and that the blockSize is a power of 2.
+// TODO: Try it by assigning double the memory and swapping the memory between
+// half that array between iterations to avoid having to add 2 __syncThreads in
+// the for loop.
+// https://stackoverflow.com/questions/19736560/hillis-steele-kernel-function
 void __global__ cdfScanHillisSteele(const unsigned int* d_histogram,
   unsigned int* const d_cdf)
 {
   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
+  // Another quick note here we are doing dynamic memory allocation.
   extern __shared__ unsigned int shistodata[];
 
   // Find the Id of the thread in the block

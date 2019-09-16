@@ -175,7 +175,7 @@ Lesson 2:
   NOTE: cudaDeviceSynchronize() ensure all the blocks execute.
 
 - CUDA guarantees that
-  - All threads ina block run on the same SM at the same time.
+  - All threads in a block run on the same SM at the same time.
   - All the blocks of 1 kernel finish before the blocks of the next kernel are run.
 
 - Memory model:
@@ -217,7 +217,7 @@ Lesson 2:
 - High level stratergies:
 
   1. Try to be smart with memory
-  - Maximize the math per memory by either upping the math per thread or
+  - Maximize the math per memory (arithmetic intensity) by either upping the math per thread or
     reducing the time spent on memory access.
   - Local>Shared>>Global>>CPU(host) in terms of speed.
   - So you wanna move frequently accessed data to fast memory.
@@ -382,4 +382,207 @@ Reduce:
           is the value. So you sort by key(bins) first and then reduce all the entries
           of the same bin to get the final value of that bin.
         - Will be discussed in future lessons.
-    -
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+Lesson 4:
+- Scan is useful way to parallelize a certain class of problems recurrence relationships
+
+- General Applications of Scan:
+  - Compact:
+      - If we only care about doing computation on a certain subset of the data.
+      - Basic structure:
+        - Input : A set
+        - Predicate : Takes in the set and retruns a boolean. Sort of a mask being
+          created from a filter.
+        - Output: The set filtered by the predicate to get a sparse output (The
+          position in the set remains same and the false elements are just null)
+          or dense (No blank spaces the filtered data is contiguous.)
+        - NOTE: A sparse construct would require running the same number of threads as the
+          original set. But most of those threads would not be utilized. But in
+          a dense representation a lower number of fully utilized threads would
+          be executed. So dense representation is more efficient. We don't want
+          idle threads.
+        - Use compact when we are throwing away a large number of elements and
+          the surviving elements require heavy computation.
+        - Core algorithm:
+          1. Predicate: On each element
+          2. Scan In array: True is 1 and False is 0
+          3. Exlusive sum scan: Output is scatter addresses for compacted arrays.
+          4. Scatter input into output using addresses. If predicate is true then take
+             the element and copy it to the address defined by the scan output.
+        - Note that steps 1,2,3 are independent of size but 4 will be faster if more
+          things are filtered out.
+
+    - Allocate:
+      - Compact is a 1 and 0 purely binary way to include and exclude things.
+      - But maybe we want to generalize that. Maybe the output on applying the
+        predicate produces more than a binary output. For example in clipping triangles
+        on a screen if the triangle is cut by the screen the resulting polygon will
+        need to be cut into triangles. So in allocate we want to be able to gather
+        both the complete triangles and the newly formed triangles in a single array.
+        That is allocate.
+      - One possible strategy:
+        - Allocate max possible space in intermediate array.
+          - Eg: A triangle can be at max be clipped so that we have to make 5 triangles
+            from the resulting 7 sided polygon. So you could allocate 5*numTriangles.
+        - Compact the result.
+        - Wasteful in space.
+        - Requires scanning large intermediate array.
+      - Better strategy:
+        - Have the predicate output the number of allocations required.
+        - Exclusive scan that predicate output.
+        - Use the output of the scan and the non zero predicate output to get the
+          address of the contiguous block. Use the output of the predicate to decide
+          the size of that contiguous block.
+
+      - Segmented scan:
+        - Split the array into segments with a separate array marking the start of the
+          segments. Do a scan on each of those individual segments.
+        - You could have an inclusive or exclusive segmented scan.
+        - See online on how to best solve this.
+
+      - Sparse Matrix Dense vector Multiplication (SpMv)
+        - Dense matrices: You wanna store all the elements.
+        - Sparse matrices: You wanna ignore the zeros.
+        - So you want a compact representation of sparse matrices and also a way to
+          multiply them with a dense vector.
+        - CSR (Compressed Sparse Row):
+          - Value: Contains all the non zero data
+          - Column: Contains the columns in which the data lie
+          - Rowptr: Contains the index/address of the first elements in the row
+                    from the Value array above. (Ie index of the first non zero
+                    element in a row in the Value vector above.)
+        - Matrix multiplication with dense vector:
+          1. Create a segmented representation using the value vector and the row pointer.
+             The row pointer contains indexes in the value vector where rows begin.
+          2. GATHER the vector values using the column vector.
+          3. Then use a MAP to pairwise multiply the vectors from 1. and 2.
+          4. Then finally add using a SEGMENTED SCAN or more optimally a SEGMENTED
+             REDUCE.
+- Sorting:
+
+    Find Efficient Parallel Algorithms:
+    - Keep HW busy (Lots of threads)
+    - Limit branch divergence
+    - Prefer coalesced memory access
+
+    Odd-Even sort (Brick sort)
+    - Mark indexes as odd even. Then have the even indexes look to the left and
+      swap if out of order. Then have them look on the right and swap if they
+      are out of order. Repeat till sort achieved.
+    - Step complexity of O(n) but work on O(n^2)(Number of comparisons)
+    - You can do the comparison in a step in parallel. So it speeds things up.
+
+    Merge sort
+    - It is a great sorting algorithm for the GPU since it is a divide and conquer algo.
+    - You basically split up the data into unit sized chunks and intelligently merge
+      sorted arrays together to get the combined totally sorted array.
+    - So you start with n elements, perform n/2 merges, to get n/2 sorted arrays,
+      then n/4 merges to get n/4 sorted arrays and so on.
+    - Since there are n elements and logn operations the work complexity is O(nlogn)
+      and the step complexity is O(n).
+    - Since the array size increases from a single element to large values, it
+      makes sense to run this in multiple stages depending on the array size at the
+      step.
+        - Do 1 merge per thread. (For small arrays)
+        - Do 1 merge per thread block. (For medium arrays)
+        - DO 1 big merge task spread across multiple SMs. (Final merge)
+    - Parallel merge:
+      - The index of the number in its own list is the thread id.
+      - Then find the index of the same number in the other array by doing a binary
+        search over the other array.
+      - The final index is hence just the sum of these 2 array indices.
+    - For the 1 big merge task if we force the task to only 1 SM most of the SMs
+      are idle. So we need to spread that task across multiple SMs.
+      - So you make splitters which are basically the points at some regular intervals
+        say n in each list.
+      - Then you parallel merge the splitters as above.
+      - Then you find the list of elements between the splitters in each list. This
+        of course cannot be more than 2*n. It can at max be 2*n. Then parallel merge them.
+
+      Sorting networks:
+      - Oblivious: Behavior is independent of some aspect of the program. Good
+        for GPUs that prefer simple processes.
+          - So in case of sorting an oblivious algorithm will have the same time
+            for a sorted or unsorted algorithm.
+      - Sorting sequences are a collection of binary comparisons that result in
+        sorted sequences
+      - Bitonic sorting:
+        - Bitonic sequence is one that changes direction only once. Increase first
+          then decrease or vice versa.
+        - We can stack the monotonic sequences over each other and take the max
+          and min and hence split it into 2 bitonic sequences.
+      - Read more about sorting networks
+
+      Radix Sort:
+      - One of the best performing sort algorithms on the GPU:
+      - Steps:
+        - Start with the least significant bit. Move the numbers with 0s on top
+          and 1s below while maintaining the order.
+        - Move to the next most significant bit and then move the 0s up and push
+          1s down while preserving order.
+        - Repeat till all bits scrolled over.
+      - The amount of work is propotional to bits and the number of numbers. But
+        since the number of bits is usually constant (32 bit). So the work complexity
+        is O(n).
+      - The first step reminds you of the compact step with the predicate (i&1==0)
+        and then run a scan to get the addresses of the 0 half. Then we can begin
+        with the last index and do a scan on the 1 (i&1==1) half and get the indexes for them.
+      - The same concept can be expanded and we could do a 16 way split by taking
+        the first 4 bits instead of only the least significant bit. This will make
+        the sort faster.
+
+      Quick Sort:
+      - One of the most efficient algorithms on the CPU but a bit complex to implement
+        on the GPU.
+      - Steps:
+          - Pick a pivot (center usually). Swap it with the end element.
+          - Pick the right most element which is smaller than the pivot. Pick the
+            left most element greater than the pivot.
+          - If the left index is less than the right index swap them.
+          - If the left is greater than the right, then swap the right element
+            with the pivot at the end.
+          - The pivot is in its correct position in the final sorted array.
+          - Perform a quick sort on the list before the pivot and the list after
+            the pivot.
+          - Keep on doing this recursively.
+      - GPUs don't really support recursion. So how to map this quicksort.
+      - You can implement this in the GPU as follows:
+        - COMPACT it by comparing the pivot element to each number and move the
+          numbers first less than (<), then equal(=) and finally greater than
+          pivot. Then repeat these operations on individual SEGMENTS.
+      - We will talk about calling Kernels within kernels in the next few lessons.
+
+      Key value sort:
+        - Maintain the keys but keep pointers to values to make it easy to move
+          them around.
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+Lesson 5:
+  - To recap from lesson 2 GPU programmers have the following goals to optimize:
+    - Increase arithmetic intensity by reducing time spent on memory operations.
+    - Coalesce global memory access.
+    - Avoid thread divergence.
+
+  - Levels of optimization:
+    1. Picking good algorithms (Merge sort vs Insertion sort)
+    2. Write cache aware code (Traverse row wise in a row ordered 2D array)
+    3. Arch specific detailed optimizations (Vector registers SSE,AVX)
+      - Not really needed a lot for GPU. The speedups gained by these are usually
+        minor.
+      - This really does matter for the CPU though.
+    4. Micro optimizations at the instruction level. (Fast inverse square root : Quake 3)
+
+  - In this lesson we're gonna look at the following at the levels mentioned above:
+    1. Fundamentally parallel.
+    2. Use shared memory and coalescing global memory.
+    3. "Bank conflicts" and optimizing registers.
+    4. Floating point denorm hacks.
+
+  - APOD:
+    - Analyze
+    - Parallelize
+    - optimize
+    - Deploy
