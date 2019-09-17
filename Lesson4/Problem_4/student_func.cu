@@ -42,31 +42,31 @@
    at the end.
  */
 
-  // Aggregate the output data using all the information calculated
-  void __global__ generateOutput(unsigned int* const d_outputVals,
-    unsigned int* const d_outputPos, const unsigned int* const d_inputVals,
-     const unsigned int* const d_inputPos,
-     const unsigned int* const d_relative_offsets,
-     const unsigned int* const d_local_cdf, unsigned int* const d_cdf,
-     const unsigned int* const d_predicate, const size_t numBins,
-     const size_t numElems)
-   {
-     int tid = threadIdx.x;
-     int bid = blockIdx.x;
-     int myId = tid + blockDim.x * bid;
-
-     if(myId<numElems)
-     {
-       int predicate = d_predicate[myId];
-
-       int in_grid_position = d_relative_offsets[myId];
-       int in_bin_position = d_local_cdf[bid*numBins + predicate] + in_grid_position;
-       int global_position = d_cdf[predicate] + in_bin_position;
-
-       d_outputVals[global_position] = d_inputVals[myId];
-       d_outputPos[global_position] = d_inputPos[myId];
-     }
-   }
+  // // Aggregate the output data using all the information calculated
+  // void __global__ generateOutput(unsigned int* const d_outputVals,
+  //   unsigned int* const d_outputPos, const unsigned int* const d_inputVals,
+  //    const unsigned int* const d_inputPos,
+  //    const unsigned int* const d_relative_offsets,
+  //    const unsigned int* const d_local_cdf, unsigned int* const d_cdf,
+  //    const unsigned int* const d_predicate, const size_t numBins,
+  //    const size_t numElems)
+  //  {
+  //    int tid = threadIdx.x;
+  //    int bid = blockIdx.x;
+  //    int myId = tid + blockDim.x * bid;
+  //
+  //    if(myId<numElems)
+  //    {
+  //      int predicate = d_predicate[myId];
+  //
+  //      int in_grid_position = d_relative_offsets[myId];
+  //      int in_bin_position = d_local_cdf[bid*numBins + predicate] + in_grid_position;
+  //      int global_position = d_cdf[predicate] + in_bin_position;
+  //
+  //      d_outputVals[global_position] = d_inputVals[myId];
+  //      d_outputPos[global_position] = d_inputPos[myId];
+  //    }
+  //  }
 
   // Generate the relative offsets of each set using a compact and segmented scan
   // Note that this is within a single thread block
@@ -128,7 +128,7 @@
 
   // Generate the global cdf
   void __global__ generateGlobalCdf(unsigned int* const d_cdf,
-    const unsigned int* const d_histogram);
+    const unsigned int* const d_histogram)
   {
     extern __shared__ float sglobalhisto[]; // allocated on invocation
 
@@ -150,7 +150,7 @@
         sglobalhisto[pout*n+tid] = sglobalhisto[pin*n+tid];
      __syncthreads();
     }
-    d_cdf[tid] = sglobalhisto[pout*n+tid1]; // write output
+    d_cdf[tid] = sglobalhisto[pout*n+tid]; // write output
   }
 
   // Generate the global histogram
@@ -240,10 +240,10 @@
     unsigned int* const d_cdf, unsigned int* const d_predicate,
     unsigned int* const d_relative_offsets, const size_t blockSize,
     const size_t gridSize, const size_t numBins, const size_t numElems,
-    const unsiunsigned int radixBits, int place)
+    const unsigned int radixBits, const int place, const unsigned int seed_mask)
   {
     unsigned int shift = place*radixBits;
-    unsigned int mask = (pow(2,radixBits)-1)<<shift;
+    unsigned int mask = seed_mask<<shift;
 
     // Populate the local histogram and the predicates
     generateLocalHistograms<<<gridSize, blockSize>>>(d_local_histogram,
@@ -251,17 +251,17 @@
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // Populate the local cdf per grid
-    generateLocalCdf<<1, gridSize, 2*gridSize*numBins*sizeof(unsigned int)>>(
+    generateLocalCdf<<<1, gridSize, 2*gridSize*numBins*sizeof(unsigned int)>>>(
       d_local_cdf, d_local_histogram, numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // Populate the global histogram
-    generateGlobalHistogram<<1, numBins>>(d_histogram, d_local_cdf, d_local_histogram,
+    generateGlobalHistogram<<<1, numBins>>>(d_histogram, d_local_cdf, d_local_histogram,
       gridSize);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // Populate the global cdf
-    generateGlobalCdf<<1, numBins, 2*numBins*sizeof(unsigned int)>>(d_cdf,
+    generateGlobalCdf<<<1, numBins, 2*numBins*sizeof(unsigned int)>>>(d_cdf,
       d_histogram);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
@@ -270,14 +270,14 @@
       d_relative_offsets, d_predicate, numElems, numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-    // 1. Use the relative offset for offset within a block
-    // 2. Use the local_cdf for grid based offset for offset within a bin
-    // 3. Use the global cdf to compute the offset in the entire list
-    // Use the predicate to access the correct bin in each of the above cases.
-    generateOutput<<<gridSize, blockSize>>>(d_outputVals, d_outputPos, d_inputVals,
-      d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
-      numElems);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // // 1. Use the relative offset for offset within a block
+    // // 2. Use the local_cdf for grid based offset for offset within a bin
+    // // 3. Use the global cdf to compute the offset in the entire list
+    // // Use the predicate to access the correct bin in each of the above cases.
+    // generateOutput<<<gridSize, blockSize>>>(d_outputVals, d_outputPos, d_inputVals,
+    //   d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
+    //   numElems);
+    // cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   }
 
 
@@ -295,6 +295,7 @@ void your_sort(unsigned int* const d_inputVals,
   // Use powers of 2 as the radix bits
   // This is important so that the numPlaces are even
   const unsigned int radixBits = pow(2,RADIX_NUMBER);
+  const unsigned int seed_mask = pow(2,radixBits)-1;
   const size_t numBins = pow(2,radixBits);
 
   // Assuming unsigned int size of 32 number of places equals 32/radixBits
@@ -348,12 +349,12 @@ void your_sort(unsigned int* const d_inputVals,
       radixSortStep(d_inputVals, d_inputPos, d_outputVals, d_outputPos,
         d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
         d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
-        i);
+        i, seed_mask);
     else
       radixSortStep(d_outputVals, d_outputPos, d_inputVals, d_inputPos,
         d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
         d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
-        i);
+        i, seed_mask);
 
     // Reset all the data to 0 for the next step
     checkCudaErrors(cudaMemset((void *) d_local_histogram, 0, gridSize*binBytes));
