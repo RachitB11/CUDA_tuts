@@ -3,9 +3,6 @@
 
 #include "utils.h"
 #include <thrust/host_vector.h>
-
-#include<bitset>
-
 #define RADIX_NUMBER 2
 /* Red Eye Removal
    ===============
@@ -45,158 +42,243 @@
    at the end.
  */
 
- // Use the predicate and the histogram to map the data to the new positions in
- // the sorted array
- void __global__ fillOutputValAndPositions(const unsigned int* const d_input,
-   const unsigned int* const d_inputPos,
-   unsigned int* const d_output, unsigned int* const d_outputPos,
-   const unsigned int* const d_histogram, const unsigned int* const d_relative_offsets,
-   const unsigned int* const d_predicate, const size_t numElems)
- {
-   int myId = threadIdx.x + blockDim.x * blockIdx.x;
-
-   if(myId<numElems)
+  // Aggregate the output data using all the information calculated
+  void __global__ generateOutput(unsigned int* const d_outputVals,
+    unsigned int* const d_outputPos, const unsigned int* const d_inputVals,
+     const unsigned int* const d_inputPos,
+     const unsigned int* const d_relative_offsets,
+     const unsigned int* const d_local_cdf, unsigned int* const d_cdf,
+     const unsigned int* const d_predicate, const size_t numBins,
+     const size_t numElems)
    {
-     unsigned int new_position = d_histogram[d_predicate[myId]] + d_relative_offsets[myId];
-     d_outputPos[new_position] = d_inputPos[myId];
-     d_output[new_position] = d_input[myId];
-   }
- }
+     int tid = threadIdx.x;
+     int bid = blockIdx.x;
+     int myId = tid + blockDim.x * bid;
 
- // For a thread make a 16xnumel shared array in which each of the dimensions is initialized to 1 at places where
- void __global__ compactAndSegmentScan( const unsigned int* const d_inputPos,
-   const unsigned int* const d_predicate, unsigned int* const d_relative_offsets,
-   const size_t numBins, const size_t numElems)
- {
-   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
-   // Another quick note here we are doing dynamic memory allocation.
-   extern __shared__ unsigned int soffsetdata[];
-
-   printf("Here1");
-
-   int myId = threadIdx.x + blockDim.x * blockIdx.x;
-
-   soffsetdata[myId]=1;
-   __syncthreads();
-
-   printf("Here2");
-
-   unsigned int temp;
-
-   for (unsigned int s = 1; s < numElems ; s <<= 1)
-   {
-       if(myId<numElems)
-       {
-         // Do not touch if the data has no neighbour s indexes left to it.
-         if(myId >= s)
-         {
-            if(d_predicate[myId]==d_predicate[myId-s])
-              temp = soffsetdata[myId] + soffsetdata[myId - s];
-         }
-         else
-         {
-            temp = soffsetdata[myId];
-         }
-       }
-       __syncthreads();        // make sure all adds at one stage are done!
-       if(myId<numElems)
-        soffsetdata[myId] = temp;
-       __syncthreads();        // make sure all adds at one stage are done!
-   }
-
-   printf("Here3");
-
-   if(myId<numElems)
-   {
-     // You need to subtract by -1 to ensure exclusive scan
-     d_relative_offsets[myId] = soffsetdata[myId] - 1;
-   }
-
-   printf("Here4");
- }
-
-
- // Perform the hillis steele scan with the sum operation to get the cdf for each histogram
- // Here we perform a segmented scan since we're handling multiple histograms together.
- //NOTE: This assumes the gridSize is 1 and that the blockSize is a power of 2.
- // TODO: Try it by assigning double the memory and swapping the memory between
- // half that array between iterations to avoid having to add 2 __syncThreads in
- // the for loop.
- // https://stackoverflow.com/questions/19736560/hillis-steele-kernel-function
- void __global__ cdfSegmentedScanHillisSteele(const unsigned int* const d_histograms,
-   unsigned int* const d_cdfs, const size_t numHistograms)
- {
-   // sdata is allocated in the kernel call: 3rd arg to <<<b, t, shmem>>>
-   // Another quick note here we are doing dynamic memory allocation.
-   extern __shared__ unsigned int shistodata[];
-
-   // Find the Id of the thread in the block
-   int tid = threadIdx.x;
-
-   // Copy the data to the shared memory
-   // shistodata[tid] = d_histogram[tid];
-   // If we're doing an exclusive scan copy the data from n-1 and set position
-   // 0 to identity which in this case is 0
-   if(tid==0)
-    for(unsigned int i=0; i<numHistograms; i++)
-      shistodata[i*blockDim.x + tid] = 0;
-   else
-    for(unsigned int i=0; i<numHistograms; i++)
-      shistodata[i*blockDim.x + tid] = d_histograms[i*blockDim.x + tid - 1];
-   __syncthreads();
-
-   unsigned int* temp = new unsigned int[numHistograms];
-
-   for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
-   {
-       // Do not touch if the data has no neighbour s indexes left to it.
-       if(tid >= s)
-       {
-         for(unsigned int i=0; i<numHistograms; i++)
-          temp[i] = shistodata[i*blockDim.x + tid] + shistodata[i*blockDim.x + tid - s];
-       }
-       else
-       {
-         for(unsigned int i=0; i<numHistograms; i++)
-          temp[i] = shistodata[i*blockDim.x + tid];
-       }
-       __syncthreads();        // make sure all adds at one stage are done!
-       for(unsigned int i=0; i<numHistograms; i++)
-        shistodata[i*blockDim.x + tid] = temp[i];
-       __syncthreads();        // make sure all adds at one stage are done!
-   }
-
-   // Assign to the global array
-   for(unsigned int i=0; i<numHistograms; i++)
-    d_cdfs[i*blockDim.x + tid] = shistodata[i*blockDim.x + tid];
-
-   delete temp;
- }
-
-
- // Generate the histograms using the simple atomics way
- void __global__ generateHistograms(unsigned int* const d_histograms,
-   unsigned int* const d_predicate, unsigned int* const d_inputVals,
-   const unsigned int* const d_mask_array, const size_t numElems,
-   const size_t numHistograms, const size_t numBins,
-   const unsigned int radixBits)
- {
-   int myId = threadIdx.x + blockDim.x * blockIdx.x;
-
-   unsigned int val = d_inputVals[myId];
-
-   if(myId<numElems)
-   {
-     for(unsigned int i=0; i<numHistograms; i++)
+     if(myId<numElems)
      {
-       // Find the digit by applying the mask
-       unsigned int digit = (val&d_mask_array[i])>>(i*radixBits);
-       // Update the predicate
-       d_predicate[i*numElems + myId] = digit;
-       atomicAdd(&(d_histograms[i*numBins + digit]), 1);
+       int predicate = d_predicate[myId];
+
+       int in_grid_position = d_relative_offsets[myId];
+       int in_bin_position = d_local_cdf[bid*numBins + predicate] + in_grid_position;
+       int global_position = d_cdf[predicate] + in_bin_position;
+
+       d_outputVals[global_position] = d_inputVals[myId];
+       d_outputPos[global_position] = d_inputPos[myId];
      }
    }
- }
+
+  // Generate the relative offsets of each set using a compact and segmented scan
+  // Note that this is within a single thread block
+  void __global__ generateRelativeOffsets(unsigned int* const d_relative_offsets,
+    const unsigned int* const d_predicate, const size_t numElems,
+    const size_t numBins)
+  {
+    // soffset data is numBins x blockDim.x
+    extern __shared__ unsigned int soffsetdata[];
+
+    int n = blockDim.x*numBins;
+    int tid = threadIdx.x;
+    int myId = threadIdx.x + blockDim.x * blockIdx.x;
+    int pout = 0;
+    int pin = 1;
+    int predicate = d_predicate[myId];
+
+    for(size_t i=0; i<numBins; i++)
+    {
+      soffsetdata[pout*n+i*blockDim.x+tid] = 0;
+    }
+    soffsetdata[pout*n+predicate*blockDim.x+tid] = 1;
+    __syncthreads();
+
+    for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
+    {
+      // Swap pin and pout
+      pout = 1 - pout;
+      pin = 1 - pout;
+      if(myId<numElems)
+      {
+        // Do not touch if the data has no neighbour s indexes left to it.
+        if(tid>=s)
+        {
+          for(size_t i=0; i<numBins; i++)
+          {
+            soffsetdata[pout*n+i*blockDim.x+tid] =
+              soffsetdata[pin*n+i*blockDim.x+tid] +
+              soffsetdata[pin*n+i*blockDim.x+tid-s];
+          }
+        }
+        else
+        {
+          for(size_t i=0; i<numBins; i++)
+          {
+            soffsetdata[pout*n+i*blockDim.x+tid] =
+              soffsetdata[pin*n+i*blockDim.x+tid];
+          }
+        }
+      }
+      __syncthreads();        // make sure all adds at one stage are done!
+    }
+    if(myId<numElems)
+    {
+      // You need to subtract by -1 to ensure exclusive scan
+      d_relative_offsets[myId] = soffsetdata[pout*n+predicate*blockDim.x+tid]-1;
+    }
+  }
+
+  // Generate the global cdf
+  void __global__ generateGlobalCdf(unsigned int* const d_cdf,
+    const unsigned int* const d_histogram);
+  {
+    extern __shared__ float sglobalhisto[]; // allocated on invocation
+
+    int n = blockDim.x;
+    int tid = threadIdx.x;
+    int pout = 0, pin = 1;
+
+    // This is exclusive scan, so shift right by one and set first element to 0
+    sglobalhisto[pout*n + tid] = (tid > 0) ? d_histogram[tid-1] : 0;
+    __syncthreads();
+
+    for (int offset = 1; offset < n; offset *= 2)
+    {
+      pout = 1 - pout; // swap double buffer indices
+      pin = 1 - pout;
+      if (tid >= offset)
+        sglobalhisto[pout*n+tid] += sglobalhisto[pin*n+tid - offset];
+      else
+        sglobalhisto[pout*n+tid] = sglobalhisto[pin*n+tid];
+     __syncthreads();
+    }
+    d_cdf[tid] = sglobalhisto[pout*n+tid1]; // write output
+  }
+
+  // Generate the global histogram
+  void __global__ generateGlobalHistogram( unsigned int* const d_histogram,
+    const unsigned int* const d_local_cdf, const unsigned int* const d_local_histogram,
+    const size_t gridSize)
+  {
+    int tid = threadIdx.x;
+    int idx_final_bin = blockDim.x*(gridSize-1) + tid;
+    d_histogram[tid] = d_local_cdf[idx_final_bin] + d_local_histogram[idx_final_bin];
+  }
+
+  // Generate the local cdf of the histograms. Here the d_histogram is of size
+  // gridSize x numBins
+  void __global__ generateLocalCdf( unsigned int* const d_local_cdf,
+    const unsigned int* const d_local_histogram, const size_t numBins)
+  {
+    extern __shared__ float shistodata[]; // allocated on invocation
+
+    // Thread id
+    int tid = threadIdx.x;
+
+    // Tells me which part is storing the in and out at the current step
+    int pout = 0, pin = 1;
+
+    // Store the total number of elements
+    int n = numBins*blockDim.x;
+
+    // Copy the data to the shared memory
+    // shistodata[tid] = d_local_histogram[tid];
+    // If we're doing an exclusive scan copy the data from n-1 and set position
+    // 0 to identity which in this case is 0
+    for(unsigned int i=0; i<numBins; i++)
+      shistodata[pout*n + tid*numBins + i] =
+        (tid > 0) ? d_local_histogram[(tid-1)*numBins + i] : 0;
+    __syncthreads();
+
+    // Do the hillis steele reduction along the grid dimension only
+    for (int s = 1; s < blockDim.x; s *= 2)
+    {
+      pout = 1 - pout; // swap double buffer indices
+      pin = 1 - pout;
+
+      if (tid >= s)
+        for(unsigned int i=0; i<numBins; i++)
+          shistodata[pout*n + tid*numBins + i] += shistodata[pin*n + (tid-s)*numBins + i];
+      else
+        for(unsigned int i=0; i<numBins; i++)
+          shistodata[pout*n + tid*numBins + i] = shistodata[pin*n + tid*numBins + i];
+      __syncthreads();
+    }
+
+    // Populate the grid row of the cdf
+    for(unsigned int i=0; i<numBins; i++)
+      d_local_cdf[tid*numBins + i] = shistodata[pout*n + tid*numBins + i];
+  }
+
+  // Generate local histograms and populate the predicate
+  void __global__ generateLocalHistograms(unsigned int* const d_local_histogram,
+    unsigned int* const d_predicate, const unsigned int* const d_inputVals,
+    const size_t numElems, const size_t numBins, const unsigned int mask,
+    const unsigned int shift)
+  {
+    int myId = threadIdx.x + blockDim.x * blockIdx.x;
+
+
+    if(myId<numElems)
+    {
+      unsigned int val = d_inputVals[myId];
+
+      // Find the digit by applying the mask
+      unsigned int digit = (val&mask)>>shift;
+
+      // Update the predicate
+      d_predicate[myId] = digit;
+
+      // Add the point to the local histogram at position (grid,digit)
+      atomicAdd(&(d_local_histogram[blockIdx.x*numBins + digit]), 1);
+    }
+  }
+
+  // The main radix step
+  void radixSortStep(const unsigned int* const d_inputVals,
+    const unsigned int* const d_inputPos, unsigned int* const d_outputVals,
+    unsigned int* const d_outputPos, unsigned int* const d_local_histogram,
+    unsigned int* const d_local_cdf, unsigned int* const d_histogram,
+    unsigned int* const d_cdf, unsigned int* const d_predicate,
+    unsigned int* const d_relative_offsets, const size_t blockSize,
+    const size_t gridSize, const size_t numBins, const size_t numElems,
+    const unsiunsigned int radixBits, int place)
+  {
+    unsigned int shift = place*radixBits;
+    unsigned int mask = (pow(2,radixBits)-1)<<shift;
+
+    // Populate the local histogram and the predicates
+    generateLocalHistograms<<<gridSize, blockSize>>>(d_local_histogram,
+      d_predicate, d_inputVals, numElems, numBins, mask, shift);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // Populate the local cdf per grid
+    generateLocalCdf<<1, gridSize, 2*gridSize*numBins*sizeof(unsigned int)>>(
+      d_local_cdf, d_local_histogram, numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // Populate the global histogram
+    generateGlobalHistogram<<1, numBins>>(d_histogram, d_local_cdf, d_local_histogram,
+      gridSize);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // Populate the global cdf
+    generateGlobalCdf<<1, numBins, 2*numBins*sizeof(unsigned int)>>(d_cdf,
+      d_histogram);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // Estimate the relative offsets in each block
+    generateRelativeOffsets<<<gridSize, blockSize, 2*blockSize*numBins*sizeof(unsigned int)>>>(
+      d_relative_offsets, d_predicate, numElems, numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // 1. Use the relative offset for offset within a block
+    // 2. Use the local_cdf for grid based offset for offset within a bin
+    // 3. Use the global cdf to compute the offset in the entire list
+    // Use the predicate to access the correct bin in each of the above cases.
+    generateOutput<<<gridSize, blockSize>>>(d_outputVals, d_outputPos, d_inputVals,
+      d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
+      numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  }
 
 
 void your_sort(unsigned int* const d_inputVals,
@@ -210,175 +292,87 @@ void your_sort(unsigned int* const d_inputVals,
   // So a radix sort is you take the LSB move all the 0s to the top and all the 1s
   // to the bottom
 
-  // TODO:
-  // Convert the global histogram function into a local histogram function.
-  // Do an inclusive scan on the local histogram data. The last elements are the global histogram data
-  // The remaining in the inclusive scan will be used to estimate the relative offsets.
-  // So this local histogram cdf can be used directly.
-
-  // Local histogram (digit*grid*numBins) cdf along the grid dimension per digit 
-  // will give the information in the offset while doing the scan over the whole
-  // array for individual digits.
-  // Global histogram (digit*numBins) cdf will give the offsets between digits.
-
-////// 1. Histogram of the number of occurrences of each digit /////////////////
-
-  // NOTE:
-  // Digit is a block of the bitset. A "place" is of size radixBits.
-  // So if radix bits is 4. There are 16 possible digits and 8 places (Assuming 32 bit integer)
-  // Number of histograms equals number of places  = 8.
-  // Number of bins is the number of possible digits = 16.
-
-  // The digit is the number of symbols you account for in your radix sort. So for
-  // a radix of 1 bit there will be 2 bins in the histogram. For 2 bits there
-  // will be 4 bins, 3 bits there will be 8 bins and so on. So lets keep the num
-  // bits as a varible.
-
   // Use powers of 2 as the radix bits
-  // This is important so that the num histograms are a whole number
+  // This is important so that the numPlaces are even
   const unsigned int radixBits = pow(2,RADIX_NUMBER);
   const size_t numBins = pow(2,radixBits);
-  unsigned int mask = pow(2,radixBits)-1;
 
-  // Assuming unsigned int size of 32 number of histograms equals number of masks
-  // equals 32/radixBits
-  const size_t numHistograms = 32/radixBits;
-  int binBytes = numHistograms * numBins * sizeof(unsigned int);
-  int elemBytes = numHistograms * numElems * sizeof(unsigned int);
-
-  unsigned int* h_mask_array = new unsigned int[numHistograms];
-  // Populate the mask array
-  for(unsigned int i=0; i<numHistograms; i++)
-  {
-    h_mask_array[i] = mask<<(radixBits*i);
-    // std::cout<<std::bitset<32>(h_mask_array[i])<<std::endl;
-  }
-  // Move the mask array to the device
-  unsigned int* d_mask_array;
-  checkCudaErrors(cudaMalloc((void**) &d_mask_array, numHistograms * sizeof(unsigned int)));
-  checkCudaErrors(cudaMemcpy(d_mask_array, h_mask_array, numHistograms * sizeof(unsigned int), cudaMemcpyHostToDevice));
-
-  // Array to store all the histograms of digits
-  // Digit j in histogram i can be accessed as (i*numBins + j)
-  unsigned int* d_histograms;
-  checkCudaErrors(cudaMalloc((void**) &d_histograms, binBytes));
-  checkCudaErrors(cudaMemset((void *) d_histograms, 0, binBytes));
-
-  // Find the predicate too while finding the histogram. That predicate will be
-  // use to find the relative offset. The predicate here is just whether the
-  // digit exists or not.
-  // int j to represent whether Elem e has digit j in place i can be accessed as (i*numElems + e = j)
-  unsigned int* d_predicate;
-  checkCudaErrors(cudaMalloc((void**) &d_predicate, elemBytes));
-  checkCudaErrors(cudaMemset((void *) d_predicate, 0, elemBytes));
+  // Assuming unsigned int size of 32 number of places equals 32/radixBits
+  const size_t numPlaces = 32/radixBits;
+  int binBytes = numBins * sizeof(unsigned int);
+  int elemBytes = numElems * sizeof(unsigned int);
 
   // Assign the block and the grid size
   const size_t blockSize = 1024;
   const size_t gridSize = numElems/blockSize + 1;
 
-  // Generate numHistograms using the mask array
-  // This should do 2 things:
-  // - Populate the histogram (Size numHistograms x numBins) of digits for each place.
-  // - Populate the predicate (Size numHistograms x numElems) to find digit in each place.
-  generateHistograms<<<gridSize, blockSize>>> (d_histograms, d_predicate, d_inputVals,
-    d_mask_array, numElems, numHistograms, numBins, radixBits);
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  // Contains the local per grid histogram information
+  // Has size equals gridSize x numBins. It contains the histogram per grid
+  unsigned int* d_local_histogram;
+  checkCudaErrors(cudaMalloc((void**) &d_local_histogram, gridSize*binBytes));
+  checkCudaErrors(cudaMemset((void *) d_local_histogram, 0, gridSize*binBytes));
 
-//////////////////2. Exclusive Prefix Sum of Histogram////////////////////unsigned //////
-  // Allocate space for the cdf of the histograms.
-  // Same size as d_histgrams (numHistograms x numBins)
-  unsigned int* d_cdfs;
-  checkCudaErrors(cudaMalloc((void**) &d_cdfs, binBytes));
-  checkCudaErrors(cudaMemset((void *) d_cdfs, 0, binBytes));
-  // Do an exclusive scan on each of the histograms
-  cdfSegmentedScanHillisSteele<<<1, numBins, binBytes>>>(d_histograms, d_cdfs, numHistograms);
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  // Contains the local per grid cdf information cdf along the grid dimension
+  // Has size equals gridSize x numBins. It contains the cdf in the grid dimension
+  unsigned int* d_local_cdf;
+  checkCudaErrors(cudaMalloc((void**) &d_local_cdf, gridSize*binBytes));
+  checkCudaErrors(cudaMemset((void *) d_local_cdf, 0, gridSize*binBytes));
 
-  std::cout<<"Number of elements are "<<numElems<<std::endl;
-  unsigned int* h_histograms = new unsigned int[numHistograms*numBins];
-  unsigned int* h_cdfs = new unsigned int[numHistograms*numBins];
-  checkCudaErrors(cudaMemcpy(h_histograms, d_histograms, binBytes, cudaMemcpyDeviceToHost));
-  checkCudaErrors(cudaMemcpy(h_cdfs, d_cdfs, binBytes, cudaMemcpyDeviceToHost));
-  for(unsigned int i=0; i<numHistograms; i++)
-  {
-    unsigned int sum = 0;
-    std::cout<<"CDF: ";
-    for(unsigned int j=0; j<numBins; j++)
-    {
-      sum+=h_histograms[i*numBins+j];
-      std::cout<<h_cdfs[i*numBins+j]<<" ";
-    }
-    std::cout<<std::endl<<"Sum for Histogram "<<i<<" the sum is "<<sum<<std::endl;
-  }
-  delete h_histograms;
+  // Contains the global histogram information
+  // Has size equals numBins representing all possible digits in a place
+  unsigned int* d_histogram;
+  checkCudaErrors(cudaMalloc((void**) &d_histogram, binBytes));
+  checkCudaErrors(cudaMemset((void *) d_histogram, 0, binBytes));
 
-  checkCudaErrors(cudaFree(d_mask_array));
-  checkCudaErrors(cudaFree(d_histograms));
-  delete h_mask_array;
+  // Contains the global cdf per bin
+  // Has size equals numBins representing all possible digits in a place
+  unsigned int* d_cdf;
+  checkCudaErrors(cudaMalloc((void**) &d_cdf, binBytes));
+  checkCudaErrors(cudaMemset((void *) d_cdf, 0, binBytes));
 
-//////////////////3.Determine relative offset of each digit/////////////////////
-  // Basically go through the numbers 1 by 1 and check its digit and add offset by
-  // 1
-  // Do a relative offset on each digit at a particular place using the predicate array.
+  // This contains the digit at a place information for each element
+  unsigned int* d_predicate;
+  checkCudaErrors(cudaMalloc((void**) &d_predicate, elemBytes));
+  checkCudaErrors(cudaMemset((void *) d_predicate, 0, elemBytes));
 
-  // Allocate space for the relative offset of the histograms
-  // Size (numBins x numElems)
+  // This contains the relative offsets of each element
   unsigned int* d_relative_offsets;
-  checkCudaErrors(cudaMalloc((void**) &d_relative_offsets, elemBytes/numHistograms));
-  checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes/numHistograms));
+  checkCudaErrors(cudaMalloc((void**) &d_relative_offsets, elemBytes));
+  checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes));
 
-  for(unsigned int i=0; i<numHistograms; i++)
+
+  for(unsigned int i=0; i<numPlaces; i++)
   {
-    // You need to ping pong between the output and input because they are on
-    // const addresses and cannot be swapped.
-    // You need to first create an auxillary block which will be of size numBinsxgridSize
-    // which will store the segmented scan for each block.
-    // While setting the final position, you will make use of 3 things to estimate
-    // the final position:
-    // - d_relative_offsets which contains the block offsets info (maintain a histogram locally)
-    // - d_block_offsets which contain the offsets of each block (You need to do a scan over local histograms)
-    // - d_cdf which gives you offset in each bin.
-    // - Final should be (d_cdf + d_block_offsets + d_relative_offsets)
+    // Do a step of the radix Sort, swap input and output each step
+    if(i%2==0)
+      radixSortStep(d_inputVals, d_inputPos, d_outputVals, d_outputPos,
+        d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
+        d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
+        i);
+    else
+      radixSortStep(d_outputVals, d_outputPos, d_inputVals, d_inputPos,
+        d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
+        d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
+        i);
 
-
-    // if(i%2==0)
-    // {
-    //   compactAndSegmentScan<<<gridSize,blockSize, blockSize*sizeof(unsigned int)>>>(
-    //     d_inputPos, (d_predicate + (i*numElems)), d_relative_offsets, numBins,
-    //     numElems);
-    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    //
-    //   fillOutputValAndPositions<<<gridSize,blockSize>>>(d_inputVals,
-    //     d_inputPos, d_outputVals, d_outputPos,
-    //     d_cdfs + (i*numBins), d_relative_offsets,
-    //     d_predicate + (i*numElems), numElems);
-    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    // }
-    // else
-    // {
-    //   compactAndSegmentScan<<<gridSize,blockSize, blockSize*sizeof(unsigned int)>>>(
-    //     d_outputPos, (d_predicate + (i*numElems)), d_relative_offsets, numBins,
-    //     numElems);
-    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    //
-    //   fillOutputValAndPositions<<<gridSize,blockSize>>>(d_outputVals,
-    //     d_outputPos, d_inputVals, d_inputPos,
-    //     d_cdfs + (i*numBins), d_relative_offsets,
-    //     d_predicate + (i*numElems), numElems);
-    //   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    // }
-    checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes/numHistograms));
+    // Reset all the data to 0 for the next step
+    checkCudaErrors(cudaMemset((void *) d_local_histogram, 0, gridSize*binBytes));
+    checkCudaErrors(cudaMemset((void *) d_local_cdf, 0, gridSize*binBytes));
+    checkCudaErrors(cudaMemset((void *) d_histogram, 0, binBytes));
+    checkCudaErrors(cudaMemset((void *) d_cdf, 0, binBytes));
+    checkCudaErrors(cudaMemset((void *) d_predicate, 0, elemBytes));
+    checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes));
   }
 
-  if(numHistograms%2==1)
-  {
-    checkCudaErrors(cudaMemcpy(d_outputPos, d_inputPos, numElems * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(d_outputVals, d_inputVals, numElems * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
-  }
+  // Note that the numPlaces are even so the final ouput should be in the output
+  // fields
 
+  // Free all the assigned arrays
   checkCudaErrors(cudaFree(d_relative_offsets));
-  checkCudaErrors(cudaFree(d_cdfs));
   checkCudaErrors(cudaFree(d_predicate));
-  checkCudaErrors(cudaFree(d_mask_array));
+  checkCudaErrors(cudaFree(d_cdf));
+  checkCudaErrors(cudaFree(d_histogram));
+  checkCudaErrors(cudaFree(d_local_cdf));
+  checkCudaErrors(cudaFree(d_local_histogram));
 
 }
