@@ -42,32 +42,32 @@
    at the end.
  */
 
-  // // Aggregate the output data using all the information calculated
-  // void __global__ generateOutput(unsigned int* const d_outputVals,
-  //   unsigned int* const d_outputPos, const unsigned int* const d_inputVals,
-  //    const unsigned int* const d_inputPos,
-  //    const unsigned int* const d_relative_offsets,
-  //    const unsigned int* const d_local_cdf, unsigned int* const d_cdf,
-  //    const unsigned int* const d_predicate, const size_t numBins,
-  //    const size_t numElems)
-  //  {
-  //    int tid = threadIdx.x;
-  //    int bid = blockIdx.x;
-  //    int myId = tid + blockDim.x * bid;
-  //
-  //    if(myId<numElems)
-  //    {
-  //      int predicate = d_predicate[myId];
-  //
-  //      int in_grid_position = d_relative_offsets[myId];
-  //      int in_bin_position = d_local_cdf[bid*numBins + predicate] + in_grid_position;
-  //      int global_position = d_cdf[predicate] + in_bin_position;
-  //
-  //      d_outputVals[global_position] = d_inputVals[myId];
-  //      d_outputPos[global_position] = d_inputPos[myId];
-  //    }
-  //  }
-  //
+  // Aggregate the output data using all the information calculated
+  void __global__ generateOutput(unsigned int* const d_outputVals,
+    unsigned int* const d_outputPos, const unsigned int* const d_inputVals,
+     const unsigned int* const d_inputPos,
+     const unsigned int* const d_relative_offsets,
+     const unsigned int* const d_local_cdf, unsigned int* const d_cdf,
+     const unsigned int* const d_predicate, const size_t numBins,
+     const size_t numElems)
+   {
+     int tid = threadIdx.x;
+     int bid = blockIdx.x;
+     int myId = tid + blockDim.x * bid;
+
+     if(myId<numElems)
+     {
+       int predicate = d_predicate[myId];
+
+       int in_grid_position = d_relative_offsets[myId];
+       int in_bin_position = d_local_cdf[bid*numBins + predicate] + in_grid_position;
+       int global_position = d_cdf[predicate] + in_bin_position;
+
+       d_outputVals[global_position] = d_inputVals[myId];
+       d_outputPos[global_position] = d_inputPos[myId];
+     }
+   }
+
   // Generate the relative offsets of each set using a compact and segmented scan
   // Note that this is within a single thread block
   void __global__ generateScanRelativeOffsets(unsigned int* const d_relative_offsets,
@@ -82,7 +82,7 @@
     unsigned int bid = blockIdx.x;
     unsigned int myId = tid + bid*blockDim.x;
     unsigned int linearId = tid + (bid%numBins)*blockDim.x;
-    unsigned int n = blockDim.x
+    unsigned int n = blockDim.x;
     unsigned int pout = 0;
     unsigned int pin = 1;
 
@@ -127,7 +127,7 @@
     unsigned int linearId = tid + (bid%numBins)*blockDim.x;
     unsigned int bin = bid/numBins;
 
-    if linearId<numElems
+    if(linearId<numElems)
       d_compact[myId] = d_predicate[linearId]==bin ? 1:0;
   }
 
@@ -284,14 +284,14 @@
         numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-    // // 1. Use the relative offset for offset within a block
-    // // 2. Use the local_cdf for grid based offset for offset within a bin
-    // // 3. Use the global cdf to compute the offset in the entire list
-    // // Use the predicate to access the correct bin in each of the above cases.
-    // generateOutput<<<gridSize, blockSize>>>(d_outputVals, d_outputPos, d_inputVals,
-    //   d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
-    //   numElems);
-    // cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // 1. Use the relative offset for offset within a block
+    // 2. Use the local_cdf for grid based offset for offset within a bin
+    // 3. Use the global cdf to compute the offset in the entire list
+    // Use the predicate to access the correct bin in each of the above cases.
+    generateOutput<<<gridSize, blockSize>>>(d_outputVals, d_outputPos, d_inputVals,
+      d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
+      numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   }
 
 
@@ -313,7 +313,7 @@ void your_sort(unsigned int* const d_inputVals,
   const size_t numBins = pow(2,radixBits);
 
   // Assuming unsigned int size of 32 number of places equals 32/radixBits
-  const size_t numPlaces = 32/radixBits;
+  const size_t numPlaces = sizeof(unsigned int)*8/radixBits;
   int binBytes = numBins * sizeof(unsigned int);
   int elemBytes = numElems * sizeof(unsigned int);
   int allBytes = numBins * numElems * sizeof(unsigned int);
