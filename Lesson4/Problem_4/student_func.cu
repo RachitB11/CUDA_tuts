@@ -67,63 +67,77 @@
   //      d_outputPos[global_position] = d_inputPos[myId];
   //    }
   //  }
+  //
+  // // Generate the relative offsets of each set using a compact and segmented scan
+  // // Note that this is within a single thread block
+  // void __global__ generateRelativeOffsets(unsigned int* const d_relative_offsets,
+  //   const unsigned int* const d_predicate, const size_t numElems,
+  //   const size_t numBins)
+  // {
+  //   // soffset data is numBins x blockDim.x
+  //   extern __shared__ unsigned int soffsetdata[];
+  //
+  //   int n = blockDim.x*numBins;
+  //   int tid = threadIdx.x;
+  //   int myId = threadIdx.x + blockDim.x * blockIdx.x;
+  //   int pout = 0;
+  //   int pin = 1;
+  //   int predicate = d_predicate[myId];
+  //
+  //   for(size_t i=0; i<numBins; i++)
+  //   {
+  //     soffsetdata[pout*n+i*blockDim.x+tid] = 0;
+  //   }
+  //   soffsetdata[pout*n+predicate*blockDim.x+tid] = 1;
+  //   __syncthreads();
+  //
+  //   for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
+  //   {
+  //     // Swap pin and pout
+  //     pout = 1 - pout;
+  //     pin = 1 - pout;
+  //     if(myId<numElems)
+  //     {
+  //       // Do not touch if the data has no neighbour s indexes left to it.
+  //       if(tid>=s)
+  //       {
+  //         for(size_t i=0; i<numBins; i++)
+  //         {
+  //           soffsetdata[pout*n+i*blockDim.x+tid] =
+  //             soffsetdata[pin*n+i*blockDim.x+tid] +
+  //             soffsetdata[pin*n+i*blockDim.x+tid-s];
+  //         }
+  //       }
+  //       else
+  //       {
+  //         for(size_t i=0; i<numBins; i++)
+  //         {
+  //           soffsetdata[pout*n+i*blockDim.x+tid] =
+  //             soffsetdata[pin*n+i*blockDim.x+tid];
+  //         }
+  //       }
+  //     }
+  //     __syncthreads();        // make sure all adds at one stage are done!
+  //   }
+  //   if(myId<numElems)
+  //   {
+  //     // You need to subtract by -1 to ensure exclusive scan
+  //     d_relative_offsets[myId] = soffsetdata[pout*n+predicate*blockDim.x+tid]-1;
+  //   }
+  // }
 
-  // Generate the relative offsets of each set using a compact and segmented scan
-  // Note that this is within a single thread block
-  void __global__ generateRelativeOffsets(unsigned int* const d_relative_offsets,
-    const unsigned int* const d_predicate, const size_t numElems,
-    const size_t numBins)
+  // Generate the compact using the predicate
+  void __global__ generateCompact(unsigned int* const d_compact,
+    const unsigned int* const d_predicate, const unsigned int numBins)
   {
-    // soffset data is numBins x blockDim.x
-    extern __shared__ unsigned int soffsetdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int bid = blockIdx.x;
+    unsigned int myId = tid + bid*blockDim.x;
 
-    int n = blockDim.x*numBins;
-    int tid = threadIdx.x;
-    int myId = threadIdx.x + blockDim.x * blockIdx.x;
-    int pout = 0;
-    int pin = 1;
-    int predicate = d_predicate[myId];
+    unsigned int linearId = tid + (bid%numBins)*blockDim.x;
+    unsigned int bin = bid/numBins;
 
-    for(size_t i=0; i<numBins; i++)
-    {
-      soffsetdata[pout*n+i*blockDim.x+tid] = 0;
-    }
-    soffsetdata[pout*n+predicate*blockDim.x+tid] = 1;
-    __syncthreads();
-
-    for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
-    {
-      // Swap pin and pout
-      pout = 1 - pout;
-      pin = 1 - pout;
-      if(myId<numElems)
-      {
-        // Do not touch if the data has no neighbour s indexes left to it.
-        if(tid>=s)
-        {
-          for(size_t i=0; i<numBins; i++)
-          {
-            soffsetdata[pout*n+i*blockDim.x+tid] =
-              soffsetdata[pin*n+i*blockDim.x+tid] +
-              soffsetdata[pin*n+i*blockDim.x+tid-s];
-          }
-        }
-        else
-        {
-          for(size_t i=0; i<numBins; i++)
-          {
-            soffsetdata[pout*n+i*blockDim.x+tid] =
-              soffsetdata[pin*n+i*blockDim.x+tid];
-          }
-        }
-      }
-      __syncthreads();        // make sure all adds at one stage are done!
-    }
-    if(myId<numElems)
-    {
-      // You need to subtract by -1 to ensure exclusive scan
-      d_relative_offsets[myId] = soffsetdata[pout*n+predicate*blockDim.x+tid]-1;
-    }
+    d_compact[myId] = d_predicate[linearId]==bin ? 1:0;
   }
 
   // Generate the global cdf
@@ -238,9 +252,10 @@
     unsigned int* const d_outputPos, unsigned int* const d_local_histogram,
     unsigned int* const d_local_cdf, unsigned int* const d_histogram,
     unsigned int* const d_cdf, unsigned int* const d_predicate,
-    unsigned int* const d_relative_offsets, const size_t blockSize,
-    const size_t gridSize, const size_t numBins, const size_t numElems,
-    const unsigned int radixBits, const int place, const unsigned int seed_mask)
+    unsigned int* const d_compact, unsigned int* const d_relative_offsets,
+    const size_t blockSize, const size_t gridSize, const size_t numBins,
+    const size_t numElems, const unsigned int radixBits, const int place,
+    const unsigned int seed_mask)
   {
     unsigned int shift = place*radixBits;
     unsigned int mask = seed_mask<<shift;
@@ -265,11 +280,17 @@
       d_histogram);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-    // Estimate the relative offsets in each block
-    generateRelativeOffsets<<<gridSize, blockSize, 2*blockSize*numBins*sizeof(unsigned int)>>>(
-      d_relative_offsets, d_predicate, numElems, numBins);
+    // Generate the compact list
+    // Note that the size of d_compact is numBins x numElems where each row
+    // represents the compact of each stream
+    generateCompact<<<gridSize*numBins, blockSize>>>(d_compact, d_predicate, numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    // // Estimate the relative offsets in each block
+    // generateRelativeOffsets<<<gridSize, blockSize, 2*blockSize*numBins*sizeof(unsigned int)>>>(
+    //   d_relative_offsets, d_predicate, numElems, numBins);
+    // cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    //
     // // 1. Use the relative offset for offset within a block
     // // 2. Use the local_cdf for grid based offset for offset within a bin
     // // 3. Use the global cdf to compute the offset in the entire list
@@ -302,6 +323,7 @@ void your_sort(unsigned int* const d_inputVals,
   const size_t numPlaces = 32/radixBits;
   int binBytes = numBins * sizeof(unsigned int);
   int elemBytes = numElems * sizeof(unsigned int);
+  int allBytes = numBins * numElems * sizeof(unsigned int);
 
   // Assign the block and the grid size
   const size_t blockSize = 1024;
@@ -341,6 +363,10 @@ void your_sort(unsigned int* const d_inputVals,
   checkCudaErrors(cudaMalloc((void**) &d_relative_offsets, elemBytes));
   checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes));
 
+  // Make an array to store the compact list for each bin
+  unsigned int* d_compact;
+  checkCudaErrors(cudaMalloc((void**) &d_compact, allBytes));
+  checkCudaErrors(cudaMemset((void *) d_compact, 0, allBytes));
 
   for(unsigned int i=0; i<numPlaces; i++)
   {
@@ -348,13 +374,13 @@ void your_sort(unsigned int* const d_inputVals,
     if(i%2==0)
       radixSortStep(d_inputVals, d_inputPos, d_outputVals, d_outputPos,
         d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
-        d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
+        d_compact, d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
         i, seed_mask);
     else
       radixSortStep(d_outputVals, d_outputPos, d_inputVals, d_inputPos,
         d_local_histogram, d_local_cdf, d_histogram, d_cdf, d_predicate,
-        d_relative_offsets, blockSize, gridSize, numBins, numElems, radixBits,
-        i, seed_mask);
+        d_compact, d_relative_offsets, blockSize, gridSize, numBins, numElems,
+        radixBits, i, seed_mask);
 
     // Reset all the data to 0 for the next step
     checkCudaErrors(cudaMemset((void *) d_local_histogram, 0, gridSize*binBytes));
@@ -363,12 +389,14 @@ void your_sort(unsigned int* const d_inputVals,
     checkCudaErrors(cudaMemset((void *) d_cdf, 0, binBytes));
     checkCudaErrors(cudaMemset((void *) d_predicate, 0, elemBytes));
     checkCudaErrors(cudaMemset((void *) d_relative_offsets, 0, elemBytes));
+    checkCudaErrors(cudaMemset((void *) d_compact, 0, allBytes));
   }
 
   // Note that the numPlaces are even so the final ouput should be in the output
   // fields
 
   // Free all the assigned arrays
+  checkCudaErrors(cudaFree(d_compact));
   checkCudaErrors(cudaFree(d_relative_offsets));
   checkCudaErrors(cudaFree(d_predicate));
   checkCudaErrors(cudaFree(d_cdf));
