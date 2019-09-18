@@ -4,7 +4,7 @@
 #include "utils.h"
 #include <thrust/host_vector.h>
 #include<bitset>
-#define RADIX_NUMBER 2
+#define RADIX_NUMBER 2 // This is the log of number of radixbits
 /* Red Eye Removal
    ===============
 
@@ -256,18 +256,21 @@
     const size_t numElems, const unsigned int radixBits, const int place,
     const unsigned int seed_mask)
   {
+//////////////Define the shift while evaluating this place//////////////////////
     unsigned int shift = place*radixBits;
     unsigned int mask = seed_mask<<shift;
 
+    // NOTE: Debug
     // std::cout<<"Mask "<<place<<" : "<<std::bitset<sizeof(unsigned int)*8>(mask)<<std::endl;
     // std::cout<<"numBins "<<place<<" : "<<numBins<<std::endl;
     // std::cout<<"numElems "<<place<<" : "<<numElems<<std::endl;
 
-    // Populate the local histogram and the predicates
+//////Populate the local histogram (gridSize x numBins) and the predicates//////
     generateLocalHistograms<<<gridSize, blockSize>>>(d_local_histogram,
       d_predicate, d_inputVals, numElems, numBins, mask, shift);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    // NOTE: Debug
     // unsigned int h_local_histogram[gridSize*numBins];
     // unsigned int sum=0;
     // checkCudaErrors(cudaMemcpy(h_local_histogram, d_local_histogram, gridSize*numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost));
@@ -279,11 +282,14 @@
     // }
     // std::cout<<sum<<std::endl;
 
-    // Populate the local cdf per grid
+///// Populate the local cdf (gridSize x numBins)along the grid dimension //////
+    // It is this local cdf that enables connecting the scans in individual
+    // thread blocks
     generateLocalCdf<<<numBins, gridSize, 2*gridSize*sizeof(unsigned int)>>>(
       d_local_cdf, d_local_histogram, numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    // NOTE: Debug
     // unsigned int h_local_cdf[gridSize*numBins];
     // unsigned int sum=0;
     // checkCudaErrors(cudaMemcpy(h_local_cdf, d_local_cdf, gridSize*numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost));
@@ -293,11 +299,12 @@
     // }
     // std::cout<<sum<<std::endl;
 
-    // Populate the global histogram
+///////////////// Populate the global histogram (numBins) //////////////////////
     generateGlobalHistogram<<<1, numBins>>>(d_histogram, d_local_cdf, d_local_histogram,
       gridSize);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    //NOTE: Debug
     // unsigned int h_histogram[numBins];
     // int sum = 0;
     // checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost));
@@ -308,11 +315,12 @@
     // }
     // std::cout<<sum<<std::endl;
 
-    // Populate the global cdf
+//////////////// Populate the global cdf (gridSize)/////////////////////////////
     generateGlobalCdf<<<1, numBins, 2*numBins*sizeof(unsigned int)>>>(d_cdf,
       d_histogram);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    //NOTE: Debug
     // unsigned int h_cdf[numBins];
     // checkCudaErrors(cudaMemcpy(h_cdf, d_cdf, numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost));
     // for(size_t i=0;i<numBins;i++)
@@ -322,13 +330,14 @@
     // std::cout<<std::endl;
     // std::cout<<h_cdf[numBins-1]+h_histogram[numBins-1]<<std::endl;
 
-    // Generate the compact list
+////////////////// Generate the compact (numBins x numElems) list///////////////
     // Note that the size of d_compact is numBins x numElems where each row
-    // represents the compact of each stream
+    // represents the compact of each element for a particular bin/digit
     generateCompact<<<gridSize*numBins, blockSize>>>(d_compact, d_predicate,
       numBins, numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+    // NOTE: Debug
     // unsigned int* h_compact = new unsigned int[numBins*numElems];
     // checkCudaErrors(cudaMemcpy(h_compact, d_compact, numBins*numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
     // unsigned int sum=0;
@@ -339,12 +348,22 @@
     // std::cout<<sum<<std::endl;
     // delete h_compact;
 
-    // Estimate the relative offsets in each block
+/////////////// Estimate the relative offsets (numElems) in each block /////////
+    //Note that the relative offsets are the offsets of the digit of the element
+    // in that "place" in the block for that digit. You need to get the offset
+    // between blocks for each digit using the local cdf. You need to get the
+    // global offset between digits using the global cdf.
+    // So:
+    // relative_offset:  Facilitates within block and digit position estimation
+    // local_cdf: Facilitates within digit position estimation
+    // global_cdf: Facilitates total position estimation
     generateScanRelativeOffsets<<<gridSize*numBins, blockSize,
       2*blockSize*sizeof(unsigned int)>>>(d_relative_offsets, d_compact, numElems,
         numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+
+///////////// Estimate the final position of the block and move the data///////
     // 1. Use the relative offset for offset within a block
     // 2. Use the local_cdf for grid based offset for offset within a bin
     // 3. Use the global cdf to compute the offset in the entire list
@@ -353,6 +372,8 @@
       d_inputPos, d_relative_offsets, d_local_cdf, d_cdf, d_predicate, numBins,
       numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+///////////////////////////////////END//////////////////////////////////////////
   }
 
 
@@ -425,6 +446,9 @@ void your_sort(unsigned int* const d_inputVals,
   checkCudaErrors(cudaMalloc((void**) &d_compact, allBytes));
   checkCudaErrors(cudaMemset((void *) d_compact, 0, allBytes));
 
+  // I'm guaranteed to have even number of places with the way the RADIX NUMBER
+  // and radix digits are defined. So I don't need to check whether the output
+  // arrays actually contain the final output.
   for(unsigned int i=0; i<numPlaces; i++)
   {
     // Do a step of the radix Sort, swap input and output each step
