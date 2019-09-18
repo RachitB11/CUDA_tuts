@@ -68,67 +68,57 @@
   //    }
   //  }
   //
-  // // Generate the relative offsets of each set using a compact and segmented scan
-  // // Note that this is within a single thread block
-  // void __global__ generateRelativeOffsets(unsigned int* const d_relative_offsets,
-  //   const unsigned int* const d_predicate, const size_t numElems,
-  //   const size_t numBins)
-  // {
-  //   // soffset data is numBins x blockDim.x
-  //   extern __shared__ unsigned int soffsetdata[];
-  //
-  //   int n = blockDim.x*numBins;
-  //   int tid = threadIdx.x;
-  //   int myId = threadIdx.x + blockDim.x * blockIdx.x;
-  //   int pout = 0;
-  //   int pin = 1;
-  //   int predicate = d_predicate[myId];
-  //
-  //   for(size_t i=0; i<numBins; i++)
-  //   {
-  //     soffsetdata[pout*n+i*blockDim.x+tid] = 0;
-  //   }
-  //   soffsetdata[pout*n+predicate*blockDim.x+tid] = 1;
-  //   __syncthreads();
-  //
-  //   for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
-  //   {
-  //     // Swap pin and pout
-  //     pout = 1 - pout;
-  //     pin = 1 - pout;
-  //     if(myId<numElems)
-  //     {
-  //       // Do not touch if the data has no neighbour s indexes left to it.
-  //       if(tid>=s)
-  //       {
-  //         for(size_t i=0; i<numBins; i++)
-  //         {
-  //           soffsetdata[pout*n+i*blockDim.x+tid] =
-  //             soffsetdata[pin*n+i*blockDim.x+tid] +
-  //             soffsetdata[pin*n+i*blockDim.x+tid-s];
-  //         }
-  //       }
-  //       else
-  //       {
-  //         for(size_t i=0; i<numBins; i++)
-  //         {
-  //           soffsetdata[pout*n+i*blockDim.x+tid] =
-  //             soffsetdata[pin*n+i*blockDim.x+tid];
-  //         }
-  //       }
-  //     }
-  //     __syncthreads();        // make sure all adds at one stage are done!
-  //   }
-  //   if(myId<numElems)
-  //   {
-  //     // You need to subtract by -1 to ensure exclusive scan
-  //     d_relative_offsets[myId] = soffsetdata[pout*n+predicate*blockDim.x+tid]-1;
-  //   }
-  // }
+  // Generate the relative offsets of each set using a compact and segmented scan
+  // Note that this is within a single thread block
+  void __global__ generateScanRelativeOffsets(unsigned int* const d_relative_offsets,
+    const unsigned int* const d_compact, const size_t numElems,
+    const size_t numBins)
+  {
+    // soffset data is numBins x blockDim.x
+    extern __shared__ unsigned int sscandata[];
+
+
+    unsigned int tid = threadIdx.x;
+    unsigned int bid = blockIdx.x;
+    unsigned int myId = tid + bid*blockDim.x;
+    unsigned int linearId = tid + (bid%numBins)*blockDim.x;
+    unsigned int n = blockDim.x
+    unsigned int pout = 0;
+    unsigned int pin = 1;
+
+    sscandata[pout*n+tid] = d_compact[myId];
+    __syncthreads();
+
+    for (unsigned int s = 1; s < blockDim.x ; s <<= 1)
+    {
+      // Swap pin and pout
+      pout = 1 - pout;
+      pin = 1 - pout;
+      if(myId<numElems)
+      {
+        // Do not touch if the data has no neighbour s indexes left to it.
+        if(tid>=s)
+        {
+          sscandata[pout*n+tid] = sscandata[pin*n+tid] + sscandata[pin*n+tid-s];
+        }
+        else
+        {
+          sscandata[pout*n+tid] = sscandata[pin*n+tid];
+        }
+      }
+      __syncthreads();        // make sure all adds at one stage are done!
+    }
+    if(linearId<numElems && d_compact[myId]==1)
+    {
+      // You need to subtract by -1 to ensure exclusive scan
+      d_relative_offsets[linearId] = sscandata[pout*n+tid]-1;
+    }
+  }
 
   // Generate the compact using the predicate
   void __global__ generateCompact(unsigned int* const d_compact,
-    const unsigned int* const d_predicate, const unsigned int numBins)
+    const unsigned int* const d_predicate, const unsigned int numBins,
+    const unsigned int numElems)
   {
     unsigned int tid = threadIdx.x;
     unsigned int bid = blockIdx.x;
@@ -137,7 +127,8 @@
     unsigned int linearId = tid + (bid%numBins)*blockDim.x;
     unsigned int bin = bid/numBins;
 
-    d_compact[myId] = d_predicate[linearId]==bin ? 1:0;
+    if linearId<numElems
+      d_compact[myId] = d_predicate[linearId]==bin ? 1:0;
   }
 
   // Generate the global cdf
@@ -283,14 +274,16 @@
     // Generate the compact list
     // Note that the size of d_compact is numBins x numElems where each row
     // represents the compact of each stream
-    generateCompact<<<gridSize*numBins, blockSize>>>(d_compact, d_predicate, numBins);
+    generateCompact<<<gridSize*numBins, blockSize>>>(d_compact, d_predicate,
+      numBins, numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-    // // Estimate the relative offsets in each block
-    // generateRelativeOffsets<<<gridSize, blockSize, 2*blockSize*numBins*sizeof(unsigned int)>>>(
-    //   d_relative_offsets, d_predicate, numElems, numBins);
-    // cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    //
+    // Estimate the relative offsets in each block
+    generateScanRelativeOffsets<<<gridSize*numBins, blockSize,
+      2*blockSize*sizeof(unsigned int)>>>( d_relative_offsets, d_compact, numElems,
+        numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
     // // 1. Use the relative offset for offset within a block
     // // 2. Use the local_cdf for grid based offset for offset within a bin
     // // 3. Use the global cdf to compute the offset in the entire list
