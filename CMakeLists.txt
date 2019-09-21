@@ -54,6 +54,7 @@ if(CUDA_FOUND)
 
   ####################### LESSON 5 #############################################
   cuda_add_executable(transpose       Lesson5/transpose.cu Lesson5/gputimer.h)
+  cuda_add_executable(deviceQuery_simplified Lesson5/deviceQuery_simplified.cpp)
 
 else(CUDA_FOUND)
   message("CUDA is not installed on this system.")

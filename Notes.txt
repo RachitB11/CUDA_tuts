@@ -606,3 +606,8 @@ Lesson 5:
     - Super important to understand where to parallelize the code.
     - Amdahl's Law:
       - Total speedup possible from parallelizing a part is given by 1/(1-p) where
+        p is the percentage of time spent in that portion.
+      - Eg: 50% -> 1/(1-0.5) = 2;
+
+  - Check out the transpose.cu code in the Lesson5 folder to see how
+    parallelization helps.
