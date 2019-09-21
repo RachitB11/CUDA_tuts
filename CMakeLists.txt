@@ -53,7 +53,7 @@ if(CUDA_FOUND)
   add_subdirectory(Lesson4/Problem_4)
 
   ####################### LESSON 5 #############################################
-  cuda_add_executable(transpose       Lesson5/transpose.cu)
+  cuda_add_executable(transpose       Lesson5/transpose.cu Lesson5/gputimer.h)
 
 else(CUDA_FOUND)
   message("CUDA is not installed on this system.")
