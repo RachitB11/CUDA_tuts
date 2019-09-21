@@ -581,8 +581,28 @@ Lesson 5:
     3. "Bank conflicts" and optimizing registers.
     4. Floating point denorm hacks.
 
+  - You should have a systematic optimization process.
+
   - APOD:
     - Analyze
     - Parallelize
     - optimize
     - Deploy
+
+  - Analyze: Profile whole application and find where it can benefit from parallelization
+    and by how much can it benefit.
+  - Parallelize: Pick an approach (OpenMP, CUDA, OpenACC) and pick the correct
+    algorithm
+  - Optimize: Profile driven optimization
+  - Deploy: Don't optimise in a vaccum! Push it to real deployment to see if it
+    helps.
+
+  - Weak vs Strong scaling:
+    - Weak: Run a larger problem in the same time
+    - Strong: Run the problem faster
+
+  - Understanding hotspots:
+    - Run a profiler: gprop, vTune, verySleepy
+    - Super important to understand where to parallelize the code.
+    - Amdahl's Law:
+      - Total speedup possible from parallelizing a part is given by 1/(1-p) where

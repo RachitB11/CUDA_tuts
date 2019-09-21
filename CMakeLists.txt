@@ -49,8 +49,11 @@ if(CUDA_FOUND)
   cuda_add_executable(reduce          Lesson3/reduce.cu)
   add_subdirectory(Lesson3/Problem_3)
 
-  ####################### LESSON 3 #############################################
+  ####################### LESSON 4 #############################################
   add_subdirectory(Lesson4/Problem_4)
+
+  ####################### LESSON 5 #############################################
+  cuda_add_executable(transpose       Lesson5/transpose.cu)
 
 else(CUDA_FOUND)
   message("CUDA is not installed on this system.")
