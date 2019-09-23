@@ -611,3 +611,151 @@ Lesson 5:
 
   - Check out the transpose.cu code in the Lesson5 folder to see how
     parallelization helps.
+
+  - Memory usage optimization
+    -NOTE: Device query is a super important tool when you're trying to profile
+    the GPU and make decisions while parallelizing your code.
+      - Check out the device query in CUDA samples or even in the Lesson5 folder we
+        can figure out plenty of things about the GPU like max block size, max grid
+        size etc.
+      - Another important ones are Memory clock and the memory bus which if multiplied
+        gives the theoretical peak bandwidth. This gives the max bandwidth you can
+        achieve. If you achieve anything above 75% you're doing an excellent job.
+      - For my computer its 3504Mhz and 128 bit respectively which gives a peak
+        bandwidth of 56.06 Gb/s
+      - For my per element transpose code I got 1024x1024 unsigned int elements
+        transposed in 0.45ms which relates to 1024*1024*4(bytes)*2(reading and writing)
+        *1000/0.45 = 18.64 gigabytes of memory transfer per second which means 33%
+        of full bandwidth utilization.
+    - Coalescing:
+      - The GPU is accessing global memory in chunks of 32 or 128 bytes at a type.
+      - So threads in a warp (which are basically blocks of 32 threads) are accessing
+        continuous memory locations ie coalesced memory then its good.
+        - Warp explanation: https://stackoverflow.com/questions/3606636/cuda-model-what-is-warp-size
+      - So if the locations are random its bad.
+      - There is also strided accesses where a stride of 2 memory locations would
+        mean double the memory access to read write. So bigger the stride the
+        worse it is.
+      - As an example in the simple per element transpose code we saw that threads
+        in the same row are being read in a coalesced manner but are being written to
+        to memory locations in different rows essentially a stride of 1024.
+    - The tool we're going to use to do this kind of profiling is nSight or other
+      tools listed here https://developer.nvidia.com/performance-analysis-tools
+    - NOTE: Check out how to use NVVP. This tool is really useful in finding the
+      hotspots of your code. Just type 'nvvp' on your terminal
+         - Running it : https://www.youtube.com/watch?v=hyKA5fb5ZJI
+         - Analysing it: https://www.youtube.com/watch?v=c0mDyjgTKqc
+    - Returning to our transpose problem, we have the problem of coalesced reads
+      but scattered writes.
+    - NOTE: Solution 1: TILING
+      - We take a tile of the input and move it to a tile of the output.
+      - This will be performed by a single threadblock. We will be making use
+        of the shared memory.
+      - We copy the elements in the shared memory in coalesced blocks.
+      - WE DO THE TRANSPOSE IN THE SHARED MEMORY.
+      - We then copy the shared memory into the output in coalesced blocks.
+      - See the transpose.cu code for the changes.
+      - A good tile size is 32 because a size of a warp is 32 and you are doing
+        reads and writes in coalesced memory.
+    - Goal is to make code fast:
+      - GPUs are fast. THey are massively parallel and they have a extremely high
+        bandwidth system to feed those processors.
+      - The goal is to use all of the memory bandwidth.
+      - NOTE: IMPORTANT LITTLE'S LAW
+        - Number of useful bytes delivered = Average latency of each memory transaction
+          * Bandwidth
+        - Note that in uncoalesced memory accessed not every memory being accessed is
+          being used and hence not useful. That is the reason we prefer coalesced access.
+          Thus all we are doing in uncoalesced access is raising the latency.
+        - There is some latency associated with transferring from DRAM on the CPU
+          to SMs and vice versa.
+    - NOTE: Solution 2: Going back to our transpose code we see that the useful memory
+      problem was solved by tiling. But there is still a synthreads call which requires
+      32x32 threads to synchronize. But what can be done is to reduce the number of
+      threads in a threadblock and also inclease the number of threadblocks per SM
+      to reduce the number of threads that need to synchronize and hence reduce latency.
+    - Occupancy:
+      - Each SM has a limited number of :
+        - Thread blocks
+        - Threads
+        - Registers for all threads
+        - Bytes of shared memory
+      - This data can again be seen in deviceQuery. This gives you an idea of where
+        the limitations lie in a particular SM.
+      - Eg:
+                     Kernel         Limit per SM   Blocks per SM
+        Threads      1024           2048           2
+        Registers    7168(7 per th) 65536          9
+        Shared mem   4k             48k            12
+        So the limiting factor is the number of threads.
+      - So how do you affect occupancy:
+        - Control the amount of shared memory i.e. tile size.
+        - Change the number of threads or thread blocks
+        - Computation options to control register usage (Might be overkill)
+    - Shared memory bank conflicts:
+      - Check it out on your own.
+      - Solved by padding the shared memory.
+
+  - Optimize compute performance
+    - 2 ways of doing that:
+      - Minimize time spent waiting at barriers. We saw that we fixed something
+        like this in our transpose code by reducing the block size to prevent
+        high latency due to large number of threads waiting to sync.
+      - Minimize thread divergence.
+    - Warp:
+      - Set of threads that execute the same instruction at the same time. Usually size 32.
+        Blocks are divided into warps.
+      - SIMD: Single instruction multiple data (Like in OPENMP, SSE/AVX vector
+        registers)
+      - SIMT: Single instruction multiple threads: This is what happens if your
+        kernel has thread divergence. Happens when you have conditionals.
+      - Since there are only 32 threads in a warp the max slowdown is 32x.
+      - For the 3 dimensional thread block it will first arrange them in warps
+        with elements along x then y and then z. Basically it will arrange them ]
+        in x dimension major then y dimension major and finally z. So thread divergence
+        will affect x the most then y and then z indices.
+    - Assorted math optimizations:
+      - Use the fp64 only when you mean it. Otherwise just use simple float.
+      - Use intrinsics when possible. Built in math operators for GPU which are
+        slightly less precise but way faster. Eg: __sin() __cos() __exp()
+      - Compiler flags for faster math.
+    - Host GPU interactions:
+      - On most systems the CPU and GPU are on different chips and they interact
+        via PCI Express Bus or PCIe for short. There is a staging area (pinned
+        host memory) on the CPU where the data needs to be copied to by the CUDA
+        before it is transferred over this bus to the GPU . So you can use
+        CUDAhostMalloc() to allocate the data directly to the staging area hence
+        avoiding a copy. Or use CUDAhostRegister() to use already allocated memory
+        and pin it. This makes the memory transfer faster. If you use pinned memory
+        you can also use CUDAmemcpyAsync() which lets the CPU keep on working
+        while the copy is happening. cudaMemcpy() intrinsically blocks while the
+        copy happens. To control this async interactions we need to talk about
+        streams.
+      - Streams:
+        - Sequence of operations that execute in order (memory transfer, kernels)
+        - Through streams we can have stuff like memory transfers and kernels run
+          concurrently.
+        - By default these operations happen serially in a single (default) stream.
+        - cudaStream_t s1; cudaStreamCreate(&s1); cudaStreamDestroy(s1);
+        - Remember to use this you need to be working with CUDAmemcpyAsync and
+          pinned memory.
+        - Streams are useful when a large amount of data is copied to and from the
+          GPU. Instead the data can be broken up and then we can do async copies.
+          So each of the pieces are doing data transfers while the not affecting
+          the other.
+        - So streams allow you to overlap memory and compute and help fill the
+          GPU with smaller kernels. Check out streams and events in the CUDA
+          programming guide.
+      - Summary:
+        - APOD = Do profile guided optimization using deviceQuery and nvvp and deploy
+        often.
+        - Measure and improve memory bandwidth:
+          - Assure sufficient occupancy to make sure the memory is busy.
+          - Coalsced global memory access.
+        - Minimize latency between memory access (Reduce barriers or look at the
+            reducing the threadblock size trick)
+        - Minimize thread divergence within warps. Avoid branchy code. Avoid
+        thread workload imbalance.
+        - Consider fast math like __sin(), __cos() etc. Use double precision
+          only when required.
+        - Use streams and async mem copies.
