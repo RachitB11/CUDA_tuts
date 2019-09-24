@@ -4,7 +4,7 @@
 #include "utils.h"
 #include <thrust/host_vector.h>
 #include<bitset>
-#define RADIX_NUMBER 2 // This is the log of number of radixbits
+#define RADIX_NUMBER 1 // This is the log of number of radixbits
 /* Red Eye Removal
    ===============
 
@@ -401,7 +401,7 @@ void your_sort(unsigned int* const d_inputVals,
   int allBytes = numBins * numElems * sizeof(unsigned int);
 
   // Assign the block and the grid size
-  const size_t blockSize = 1024;
+  const size_t blockSize = 512;
   const size_t gridSize = numElems/blockSize + 1;
 
   // Contains the local per grid histogram information

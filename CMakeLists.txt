@@ -13,13 +13,12 @@ if(CUDA_FOUND)
   # whether to build x64.  We tell it to support most devices, though,
   # to make sure more people can easily run class code without knowing
   # about this compiler argument
-  set(CUDA_NVCC_FLAGS "
-  -std=c++11
+  set(CUDA_NVCC_FLAGS "-std=c++11 -O3")
   #-ccbin /usr/bin/clang;
   #-gencode;arch=compute_20,code=sm_20;
-  -gencode;arch=compute_30,code=sm_30;
-  -gencode;arch=compute_35,code=sm_35;
-  -gencode;arch=compute_35,code=compute_35;")
+  #-gencode;arch=compute_30,code=sm_30;
+  #-gencode;arch=compute_35,code=sm_35;
+  #-gencode;arch=compute_35,code=compute_35;")
 
   # add -Wextra compiler flag for gcc compilations
   if (UNIX)
@@ -27,7 +26,7 @@ if(CUDA_FOUND)
   endif (UNIX)
 
   # add debugging to CUDA NVCC flags.  For NVidia's NSight tools.
-  set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} "-G")
+  # set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} "-G")
 
   cuda_add_executable(cuda-test extra/cuda-test.cu)
 
