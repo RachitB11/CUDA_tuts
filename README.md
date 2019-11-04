@@ -36,4 +36,4 @@ by comparing it to a template.
 - Perform a RADIX SORT on the scores on the GPU.
 - SEGMENTED SCAN, COMPACT
 
-<img src="Images/p4_input.jpg" width="425" title="Low Illumination"/> <img src="Images/p4_no_red_eye.png" width="425" title="Tone Mapped"/>
+<img src="Images/p4_input.jpg" width="425" title="Red Eye"/> <img src="Images/p4_no_red_eye.png" width="425" title="Red Eye Removed"/>
