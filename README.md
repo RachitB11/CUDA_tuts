@@ -10,4 +10,4 @@ Key concepts:
 - Simple example of setting up kernels and deciding blocks and grids sizes.
 - Implementing the MAP operation to convert an RGB image to grayscale
 
-<img src="Images/p1_rgb.jpg" width="425"/> <img src="Images/p1_grayscale.jpg" width="425"/>
+<img src="Images/p1_rgb.jpg" width="425" title="RGB"/> <img src="Images/p1_grayscale.png" width="425" title="Grayscale"/>
