@@ -9,6 +9,3 @@ All the notes are compiled in the in Notes.txt .
 Key concepts:
 - Simple example of setting up kernels and deciding blocks and grids sizes.
 - Implementing the MAP operation to convert an RGB image to grayscale
-RGB                       |  Grayscale
-:------------------------:|:-------------------------:
-![](Images/p1_rgb.jpg)  |  ![](Images/p1_grayscale.png)
